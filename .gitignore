@@ -1,0 +1,40 @@
+# Private drawings and generated artifacts (at any directory depth).
+dwg/
+svg_runs/
+output/
+outputs/
+*.dwg
+*.DWG
+*.dxf
+*.DXF
+*.svg
+*.SVG
+*.png
+*.PNG
+*.pdf
+*.PDF
+*.json
+*.JSON
+*.jsonl
+*.json5
+*.sh
+*.SH
+*.patch
+
+# Machine-specific configuration, debug probes, and editor state.
+.local/
+config/
+zz_probe*_test.go
+.idea/
+.vscode/
+.DS_Store
+.env
+.env.*
+
+# Build and test output.
+bin/
+dist/
+*.test
+*.exe
+*.out
+coverage/
