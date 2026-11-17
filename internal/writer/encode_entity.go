@@ -1,12 +1,9 @@
-// 本文件实现实体的 round-trip 位级回放（dwgwrite 编码方向的实体侧）：
-// 解码时由 scanEntityBest 的 fillMeta 挂载点调用 collectEntityRawBits，
-// 从最终命中候选收集原始位串（preBits/headRawBits/RawHandleBits，字段
-// 挂在 baseEntity 上，生产解码路径默认填充，供写出回放与测试共用）；
-// 编码侧 encodeEntityR200x 将三段
-// 位串原样回放为完整记录 body。与内部对象的 encodeInternalObjectR2000
-// 不同，实体回放不回填流内 RL objSize：preBits 从 body 局部 0 起收集，
-// 重编码 body 的坐标系与源记录逐位一致，重解码可直接走 parseObjHeader
-// 标准入口（R2000 系含 BS 类型码前导，R2010+ 含 UMC+OT 前导）。
+// 本文件根据解码时保留的原始位流回放实体记录。
+//
+// EncodeEntityR200x 按记录前导、数据区和句柄流的顺序写出原始位串，
+// 保留源记录内部的位偏移关系。此路径依赖解析阶段采集的数据；实体
+// 字段的结构化编码在 encode_forward.go 中实现。
+
 package writer
 
 import (
@@ -19,7 +16,7 @@ import (
 // EncodeEntityR200x 将实体重编码为完整记录 body 位流（R13-R2018 家族
 // 通用）：preBits + headRawBits + RawHandleBits 三段原样回放，返回 body
 // 字节与 handle 流起点位（datEnd，body 局部坐标，与源记录一致）。位串
-// 未收集（生产路径结构异常或解码失败兜底产物）时报错，由调用方按
+// 未收集（生产路径结构异常或解码失败回退产物）时报错，由调用方按
 // 能力边界处理。
 func EncodeEntityR200x(ent any, ver container.DwgVersion) ([]byte, uint64, error) {
 	_ = ver // 回放方案与版本无关：位串原样保留全部版本差异

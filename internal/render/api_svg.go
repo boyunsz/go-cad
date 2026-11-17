@@ -1,6 +1,9 @@
-// api_svg.go emits preview SVG paths and editable text with source metadata.
-// Fidelity="faithful" delegates to PreparedDrawing so SVG and PNG share the
-// same geometry, font layout, clipping, and visibility decisions.
+// 本文件提供 SVG 输出入口和预览模式的 SVG 编码。
+//
+// 预览模式将图元编码为路径和可编辑文字，并附带源元数据。
+// Fidelity 为 faithful 时委托 PreparedDrawing 输出，与 PNG 共用几何、
+// 文字布局、裁剪和可见性处理。
+
 package render
 
 import (
@@ -19,10 +22,9 @@ import (
 // A larger budget accommodates repeated detail blocks without pixel buffers.
 const svgExpandBudget = 2000000
 
-// RenderSVG renders SVG using the selected fidelity mode.
-// The preview path renders model space; faithful mode also supports layouts.
-// opts.Width 决定固有像素宽度与线宽基准（viewBox 保持世界坐标，缩放无损）；
-// 高度按包围盒比例确定；背景色填充 rect（默认白色，与 RenderPNG 一致）。
+// RenderSVG 根据 Fidelity 选择预览或 faithful 渲染路径，并返回 SVG 字节。
+// 预览路径处理模型空间；faithful 路径支持布局选择。Width 控制输出的
+// 固有宽度，视口和高度由相应渲染管线计算。
 func RenderSVG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	if opts.Fidelity == "faithful" {
 		p, e := PrepareDrawing(doc, opts)
@@ -31,7 +33,7 @@ func RenderSVG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 		}
 		return p.SVG()
 	}
-	// nil 文档防御：与 RenderPNG 等导出 API 的错误返回口径一致，不 panic
+	// 空文档按导出接口约定返回错误。
 	if doc == nil {
 		return nil, fmt.Errorf("cad: 文档为空，无法渲染")
 	}
@@ -48,7 +50,7 @@ func RenderSVG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	prim.Budget = svgExpandBudget
 	prims := prim.ExpandAll()
 	prims = filterRadiatingStrokes(prims)
-	// 与 RenderPNG 同口径：分位窗口 + 主分量收紧，双峰分布不再撑大视口
+	// 使用与预览 PNG 相同的分位范围和主要坐标簇估计视口。
 	bbox := quantileSheetBounds(prims)
 	if bbox.Invalid() {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
@@ -58,7 +60,7 @@ func RenderSVG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	marginX := (bbox.MaxX - bbox.MinX) * 0.05
 	marginY := (bbox.MaxY - bbox.MinY) * 0.05
 	if marginX == 0 && marginY == 0 {
-		marginX, marginY = 1, 1 // 退化（单点/空图）兜底
+		marginX, marginY = 1, 1 // 退化（单点/空图）回退
 	} else if marginX == 0 {
 		marginX = marginY
 	} else if marginY == 0 {
@@ -160,7 +162,7 @@ func (em *svgEmitter) xy(x, y float64) (int64, int64) {
 		int64(math.Round((em.bbox.MaxY - y) * 1000))
 }
 
-// layerID 图层句柄 → 分组 id 片段：有名图层用真名（doc.layerColors 解析
+// layerID 图层句柄 → 分组 id 片段：有名图层用真名（doc.LayerColors 解析
 // 产物），无名/无图层信息用 handle-<hex>；按句柄缓存免逐图元格式化。
 func (em *svgEmitter) layerID(doc *drawing.Document, h uint64) string {
 	if id, ok := em.layerIDs[h]; ok {
@@ -229,11 +231,9 @@ func rgbKeyOf(c color.RGBA) rgbKey {
 // （2e9²×2 ≈ 8e18）不溢 int64。
 const svgCollinearLimit = 2_000_000_000
 
-// svgMaxPathAttr 单个 path d 属性值的字节上限：libxml2 对超长行有内部
-// lookup 限制（超限报 Huge input lookup，实测 ~1MB 的行即可触发），按
-// 1MB 分片；切点回退到最近的子路径 M 边界，保证每片 d 数据仍合法。整图
-// 50MB 级输出经 xmllint 校验时需 --huge（XML_PARSE_HUGE），浏览器解析
-// 不受影响。
+// svgMaxPathAttr 是单个路径 d 属性的目标字节上限。
+// 路径按子路径 M 边界分片，以减小单个 XML 属性的规模；解析器仍可能
+// 对整个文件设置额外限制。
 const svgMaxPathAttr = 1 << 20
 
 // absI64 int64 绝对值（MinInt 防溢出取反）。
@@ -244,16 +244,10 @@ func absI64(v int64) int64 {
 	return v
 }
 
-// emit 序列化一个展开图元：stroke 图元的 d 数据合并入同色组（组内共享
-// 单一 <path> 元素，d 中以 M 断开子路径），label 图元输出 <text>（或无
-// 文本时退化为与 PNG 占位条同款的半高矩形框）。
-//
-// path 体积优化（大图纸数百万段时绝对坐标约 24B/段）：
-//   - 首点 M 绝对坐标，后续段用相对增量 l/h/v（小数位少的短增量）；
-//   - 水平/垂直段单坐标 h/v；
-//   - 数字去尾零与小数点前导零（0.087 → .087），负号隐式分隔坐标对；
-//   - 大数值降小数位（千单位级线段上 0.01 的绝对误差不可见）；
-//   - 同向共线连续段累加合并为一段（折线共线顶点、密集插值段）。
+// emit 将展开后的描边或文字图元编码为 SVG。
+// 描边按颜色及图层分组，文字输出为 text；缺少文字内容时绘制占位框。
+// 路径使用相对命令、数值精度调整和共线段合并减小输出体积，坐标量化
+// 会引入有限误差。
 func (em *svgEmitter) emit(doc *drawing.Document, p *drawing.Primitive, bgWhite bool) {
 	switch p.Kind {
 	case 0:
@@ -393,7 +387,7 @@ func rescaleMilli(v int64, fracDigits int) int64 {
 func svgAutoDigits(_ int64) int { return 3 }
 
 // appendLabelBox 输出文字占位框：基线左端为原点、向上半高，随 rot 旋转
-// （几何口径与 canvas.drawLabel 一致），d 数据并入同色×图层组。
+// （几何规则与 canvas.drawLabel 一致），d 数据并入同色×图层组。
 func (em *svgEmitter) appendLabelBox(doc *drawing.Document, p *drawing.Primitive, k rgbKey) {
 	g := em.groupFor(doc, p.Layer, k)
 	lb := &p.Lb
@@ -459,9 +453,8 @@ func (em *svgEmitter) textElement(p *drawing.Primitive, k rgbKey) []byte {
 		b = append(b, ` text-anchor="end"`...)
 	}
 	b = append(b, '>')
-	// MTEXT 多行（\P 剥离为 \n）拆为 tspan 行：行距取 1.2×字高（工程近似，
-	// 与 AutoCAD 默认行距因子的视觉密度接近）；后续行相对上一行下移，
-	// tspan 继承 text 的 transform，旋转文本整体跟随旋转
+	// 将 MTEXT 的显示行转换为 tspan，预览路径使用 1.2 倍字高的近似行距。
+	// 后续行相对上一行下移，并继承文字的整体变换。
 	lines := strings.Split(lb.Text, "\n")
 	for i, ln := range lines {
 		if i == 0 {

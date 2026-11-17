@@ -1,5 +1,7 @@
-// Package bitstream reads and writes the packed bit encodings used by DWG.
-// Readers track bit offsets; text decoding uses the drawing version and codepage.
+// Package bitstream 提供 DWG 位流的读取、写入和校验工具。
+//
+// 读取器以位偏移记录当前位置；字符串解码根据图纸版本和码页选择编码。
+// 写入器提供对应的位编码操作，供实体、对象和容器编码使用。
 package bitstream
 
 import (
@@ -29,7 +31,7 @@ type BitStream struct {
 	Src []byte
 	Pos int
 	Sub uint8
-	// legacyBT 标记 R13/R14 位流：BT（位厚度）在该版本前无 1 位 mode 前缀，
+	// LegacyBT 标记 R13/R14 位流：BT（位厚度）在该版本前无 1 位 mode 前缀，
 	// 直接为 BD（LibreDWG bit_read_BT 的 from_version 分支）。
 	LegacyBT bool
 	// textLimit 文本长度字段的安全上限（1 Mi 字符），拦截脏数据导致的超大分配。
@@ -337,7 +339,7 @@ func (r *BitStream) ReadDD(def float64) (float64, error) {
 }
 
 // ReadBT 位厚度：R2000+ 为 1 位 mode（1 → 0.0，否则 BD）；
-// R13/R14 无 mode 位、直接读 BD（LibreDWG bit_read_BT 同款版本分支）。
+// R13/R14 无 mode 位、直接读 BD（LibreDWG bit_read_BT 相同版本分支）。
 func (r *BitStream) ReadBT() (float64, error) {
 	if r.LegacyBT {
 		return r.ReadBD()
@@ -619,7 +621,7 @@ func DecodeCodepage(b []byte, codepage uint16) string {
 	return string(b)
 }
 
-// ReadRLL 读 64 位小端整数（两次 32 位拼合）
+// ReadRLL 通过两次 32 位读取，组合成 64 位小端整数。
 func (r *BitStream) ReadRLL() (uint64, error) {
 	lo, err := r.ReadRL()
 	if err != nil {

@@ -1,4 +1,7 @@
-// render_full_test.go 渲染层单元测试：tessellation、过滤、鲁棒视口、颜色解析。
+// 本文件验证渲染基础计算与预览模式的过滤规则。
+//
+// 测试覆盖曲线离散、包围盒与视口估计、颜色优先级和坐标变换等行为。
+
 package render
 
 import (

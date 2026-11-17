@@ -1,6 +1,8 @@
-// 本文件实现位级写入器（dwgwrite 编码方向的基座）：与 bitStream 对称的
-// 写原语。位流按 MSB 优先逐位写入，多字节整数按 DWG 惯例小端。
-// 供对象/实体重编码（round-trip 往返验证）与后续 dwgwrite 复刻使用。
+// 本文件实现 DWG 位流写入器 EncWriter。
+//
+// 位值按高位优先顺序写入，多字节数值按对应 DWG 字段的编码规则序列化。
+// 写入操作供结构化编码和原始位流回放使用，与 BitStream 的读取操作对应。
+
 package bitstream
 
 import (
@@ -49,7 +51,7 @@ func (w *EncWriter) WriteRL(v uint32) {
 	w.WriteRC(uint8(v >> 24))
 }
 
-// WriteBLLc 写 BLL 压缩编码（对齐 LibreDWG bit_write_BLL，与 readBLL 对称）：
+// WriteBLLc 写 BLL 压缩编码（对齐 LibreDWG bit_write_BLL，与 ReadBLL 对称）：
 // 3 位长度码，码值 1/2/4 写 RC/RS/RL，其余码值写对应字节数的小端序列。
 func (w *EncWriter) WriteBLLc(v uint64) {
 	n := 8
@@ -75,7 +77,7 @@ func (w *EncWriter) WriteBLLc(v uint64) {
 }
 
 // WriteRD 写 64 位 IEEE double：8 字节小端、每字节 MSB 优先逐位写
-// （与 readRD 的 8×readRC + leF64 对称，支持非字节对齐位置）。
+// （与 ReadRD 的 8×ReadRC + leF64 对称，支持非字节对齐位置）。
 func (w *EncWriter) WriteRD(f float64) {
 	bits := math.Float64bits(f)
 	for i := 0; i < 8; i++ {
@@ -129,12 +131,11 @@ func (w *EncWriter) WriteBL(v uint32) {
 // WriteBLLv 写压缩 64 位整数：0 走 BB10，≤255 走 BB01+RC，≤65535 走 BB00+RS，
 // 其余 BB11+BLL。
 func (w *EncWriter) WriteBLLv(v uint64) {
-	// 委托 writeBLLc（与 readBLL 的 3 位长度码完全对称）。原实现误用
-	// 2 位 BB 码分支，读侧 readBLL 以 3 位码解析，写出即不可读。
+	// 使用 WriteBLLc 写入与 ReadBLL 对应的三位长度码。
 	w.WriteBLLc(v)
 }
 
-// WriteBD 写压缩双精度（对齐 readBD 语义）：1.0 走 BB01、0.0 走 BB10，
+// WriteBD 写压缩双精度（对齐 ReadBD 语义）：1.0 走 BB01、0.0 走 BB10，
 // 其余 BB00+RD 全量。
 func (w *EncWriter) WriteBD(f float64) {
 	switch {
@@ -148,7 +149,7 @@ func (w *EncWriter) WriteBD(f float64) {
 	}
 }
 
-// WriteDD 写差分双精度（相对默认值，与 readDD / LibreDWG bit_write_DD 对称）：
+// WriteDD 写差分双精度（相对默认值，与 ReadDD / LibreDWG bit_write_DD 对称）：
 // 码 0=与默认值位级相同不写数据、1=仅低 4 字节不同写 4 字节、
 // 2=次高 2 字节不同写 6 字节（覆盖序 data[4],data[5],data[0..4)，最高 2 字节保留默认值）、
 // 3=高 2 字节不同走全量 RD。
@@ -264,15 +265,14 @@ func boolBit(v bool) uint64 {
 	return 0
 }
 
-// WriteRLL 写 64 位小端整数（两次 32 位拼合，与 readRLL 对称）。
+// WriteRLL 写 64 位小端整数（两次 32 位拼合，与 ReadRLL 对称）。
 func (w *EncWriter) WriteRLL(v uint64) {
 	w.WriteRL(uint32(v))
 	w.WriteRL(uint32(v >> 32))
 }
 
-// byteBitsTable 每个字节值预展开为 8 个 '0'/'1' 字符（collectBits 整字节
-// 快路径用）：解析热路径每个实体都要收集三段回放位串，逐位循环是解析
-// 侧最大热点（pprof CPU ~20%），查表一次展开 8 位，输出逐位一致。
+// byteBitsTable 保存每个字节对应的八位二进制字符序列。
+// CollectBits 对整字节使用查表转换，避免重复逐位生成字符。
 var byteBitsTable [256][8]byte
 
 // init 预计算每个字节的高位优先二进制字符序列，供位串写出使用。

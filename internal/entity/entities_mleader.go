@@ -1,10 +1,11 @@
-// entities_mleader.go MULTILEADER 多重引线实体解码（dwg2.spec
-// DWG_ENTITY(MULTILEADER)，AcDbMLeader）。主体位流按 spec 顺序直读：
-// 三层嵌套 REPEAT（leaders→lines→breaks/points）、ctx 内容联合
-// （txt ~25 字段 / blk ~7 字段二选一）、R2010b/R2013b 版本分支；
-// 所有 FIELD_HANDLE 在尾部 handle 流按 spec 顺序读取（dat 不占位，
-// 对齐 LibreDWG obj_handle_stream + VALUE_HANDLE 行为）；R2007+ 的
-// T 字符串存于记录尾字符串区（obj_string_stream），dat 不占位。
+// 本文件解析 MULTILEADER 多重引线实体。
+//
+// 主体包含引线节点、引线段、断点和内容上下文；内容按文字或块引用
+// 分别读取。句柄从尾部句柄流读取，R2007 及之后版本的文本从独立
+// 字符串区读取；版本差异由相应分支处理。
+//
+// 格式参考：LibreDWG dwg2.spec 中的 MULTILEADER 定义。
+
 package entity
 
 import (
@@ -101,7 +102,7 @@ type MleaderNode struct {
 	AttachDir uint16
 }
 
-// MleaderArrowhead / mleaderBlockLabel R14-R2007 的箭头/块标签数组项。
+// MleaderArrowhead / MleaderBlockLabel R14-R2007 的箭头/块标签数组项。
 type MleaderArrowhead struct {
 	IsDefault bool
 	Arrowhead uint64 // H 345（handle 流）
@@ -150,7 +151,7 @@ type EntMLeader struct {
 	// 主体尾段（spec 顺序）
 	MleaderStyle    uint64 // H 340（handle 流）
 	Flags           uint32 // BLx 90（override 掩码）
-	MleaderType     uint16 // BS 170；gold 的 type 键即该值（覆盖顶层类型码）
+	MleaderType     uint16 // BS 170；参考 JSON 的 type 键即该值（覆盖顶层类型码）
 	LineColor       MleaderCMC
 	LineLtype       uint64 // H 341（handle 流）
 	LineLinewt      int32  // BLd
@@ -210,8 +211,8 @@ func readMLeaderCMC(r *bitstream.BitStream, ver container.DwgVersion) (MleaderCM
 	if err != nil {
 		return c, err
 	}
-	// flag&1/&2 的 name/book_name 在 R2007+ 存于字符串流（dat 不占位），
-	// 样本未覆盖该分支，暂不读取
+	// 当前分支不恢复颜色名称和色册名称。
+	// R2007 及之后版本的这些字符串位于独立字符串流，不占主体位流位置。
 	if Flag >= 4 {
 		Flag = 0
 	}

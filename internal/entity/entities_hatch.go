@@ -1,6 +1,10 @@
-// entities_hatch.go 实现 HATCH 实体解码：渐变填充段、边界路径
-// （边集/多段线两类）、图案定义段与种子点段（保留原始参数供审计对照）。
-// 位级布局对照 LibreDWG dwg.spec DWG_ENTITY (HATCH)。
+// 本文件解析 HATCH 填充实体。
+//
+// 解析结果保留渐变参数、边界路径、图案定义线和种子点，供渲染与字段
+// 诊断使用。边界路径分别处理边段集合和多段线表示。
+//
+// 格式参考：LibreDWG dwg.spec 中的 HATCH 定义。
+
 package entity
 
 import (
@@ -48,7 +52,7 @@ type EntHatch struct {
 	HasDerived          bool
 	Deflines            []HatchDefLine
 	Paths               []HatchPath
-	Seeds               []Point2 // 种子点（DXF 98+10/20；DWG 位流侧暂不消费）
+	Seeds               []Point2 // 填充种子点；DWG 尾部点列及 DXF 组码 98、10、20 均可填充此字段。
 }
 
 // HatchGradientColor 渐变填充单色标量（CMC 名/书名不保存）。
@@ -77,7 +81,7 @@ type HatchPath struct {
 	Segs           []HatchSeg      // 边集路径的原始段参数
 	PolyVerts      []HatchPolyVert // 多段线路径的原始顶点
 	Points         []Point2        // 细分点列（渲染）
-	// 路径尾部 BL 计数与 handle 流中的边界对象句柄（gold
+	// 路径尾部 BL 计数与 handle 流中的边界对象句柄（参考 JSON
 	// paths[i].boundary_handles 键导出）
 	numBoundaryHandles uint32
 	boundaryHandles    []uint64
@@ -321,7 +325,7 @@ func finishHatchBody(r *bitstream.BitStream, Head *CommonEntityHead, h *EntHatch
 		if e != nil {
 			return nil, e
 		}
-		h.Seeds = append(h.Seeds, Point2{sx, sy}) // gold seeds 键导出
+		h.Seeds = append(h.Seeds, Point2{sx, sy}) // 参考 JSON seeds 键导出
 	}
 	r.SetBitPos(Head.ObjSizeBit)
 	if Owner, Layer, e := ParseCommonEntityHandles(r, Head); e == nil {
@@ -584,7 +588,7 @@ func decodeHatchGradient(r *bitstream.BitStream, h *EntHatch, streamName, tu boo
 
 // readColorCMCR2004 读取 R2004+ CMC 颜色字段（BS index + BL rgb + RC
 // flag + [flag&1 TU 名 + flag&2 TU 书名]），返回 [index, rgb 字串]。
-// rgb 高字节 method 保留完整 32 位（对齐 gold 的 c200xxxx 口径）。
+// rgb 高字节 method 保留完整 32 位（对齐 参考 JSON 的 c200xxxx 规则）。
 func readColorCMCR2004(r *bitstream.BitStream) ([2]string, error) {
 	var out [2]string
 	idx, err := r.ReadBS()

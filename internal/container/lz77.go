@@ -1,8 +1,8 @@
-// lz77.go 实现 DWG R2004+ 页面数据的 Autodesk LZ77 变体解压。
-// 该算法以字节流 opcode 驱动（非位流）：由字面量前导长度与
-// (复制长度, 回溯偏移) 对交替组成，是 R2004 家族 system section 与
-// data page 的统一压缩方式。各 opcode 形态由形态表 lz77Forms 描述，
-// 主循环查表分派。
+// 本文件实现 R2004 系列 DWG 页面使用的 LZ77 变体解压器。
+//
+// 输入按字节操作码解析，由字面量数据与回溯引用组成。操作码布局由
+// lz77Forms 定义；解压过程中检查输入范围、回溯偏移和预期输出长度。
+
 package container
 
 import "fmt"

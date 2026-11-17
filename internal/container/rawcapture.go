@@ -1,5 +1,8 @@
-// rawcapture.go retains source container sections and records for DWG export.
-// Invalid capture ranges are skipped without preventing the remaining parse.
+// 本文件保存 DWG 容器中的原始段、页面信息和对象记录。
+//
+// 保存结果供 writer 包进行同版本回放式导出，避免仅凭已解析字段重建
+// 未支持的数据。各版本采集函数负责校验读取范围并处理无法采集的记录。
+
 package container
 
 import (
@@ -12,18 +15,18 @@ import (
 // R2000RawData R2000 家族容器的原始写出素材：解析时从源文件保留的原样字节，
 // 供 WriteDwgR2000 做文件级回放。仅在 R2000/R13/R14 解析路径填充。
 type R2000RawData struct {
-	// header 文件头 [0x00,0x15) 原始字节：版本串（AC1012/AC1014/AC1015）+
-	// 未知区 + 码页。写出端原样回放，保证 detectVersion/readCodepage 一致。
+	// Header 保存文件头 [0x00,0x15) 的原始字节，包括版本标识和码页。
+	// 回放式写出保留这些字节，以维持源文件的版本和编码信息。
 	Header []byte
-	// order 段号按源目录出现顺序（写出目录条目时保持同序）。
+	// Order 段号按源目录出现顺序（写出目录条目时保持同序）。
 	Order []uint8
-	// sections 段号 → 段原始字节（含段内哨兵/CRC，仅收录源目录中 size>0 的段）。
+	// Sections 段号 → 段原始字节（含段内哨兵/CRC，仅收录源目录中 size>0 的段）。
 	Sections map[uint8][]byte
-	// refs 对象图条目（handle 与源文件内绝对偏移），重建对象图流用。
+	// Refs 对象图条目（handle 与源文件内绝对偏移），重建对象图流用。
 	Refs []objrec.ObjectRef
-	// objBase 对象区源基址（refs 中最小记录偏移）。
+	// ObjBase 对象区源基址（refs 中最小记录偏移）。
 	ObjBase uint32
-	// objBlob 对象区原始字节 [objBase, 最大记录尾)，含 MS 头与尾部 CRC，
+	// ObjBlob 对象区原始字节 [objBase, 最大记录尾)，含 MS 头与尾部 CRC，
 	// 整块回放到新布局后基址平移，对象图差分随之重编。
 	ObjBlob []byte
 }
@@ -71,7 +74,7 @@ func CaptureR2000Raw(Data []byte, Refs []objrec.ObjectRef) *R2000RawData {
 	return raw
 }
 
-// r2000RecordEnd 计算对象记录在文件中的结束偏移，与 parseObjectRecord 的
+// r2000RecordEnd 计算对象记录在文件中的结束偏移，与 ParseObjectRecord 的
 // 读取语义精确对齐：MS 大小字段（2 或 4 字节，RS 字高位为续传标志）+
 // size 字节 body + 2 字节尾部 CRC。
 func r2000RecordEnd(Data []byte, off uint32) (uint64, bool) {
@@ -96,10 +99,10 @@ func r2000RecordEnd(Data []byte, off uint32) (uint64, bool) {
 	return end, true
 }
 
-// ---- R2004 (AC1018~AC1032) 容器：加密头 + 页表 + 段表 + LZ77 压缩页 ----
+// R2004 (AC1018~AC1032) 容器：加密头 + 页表 + 段表 + LZ77 压缩页。
 //
 // 写出与 container.go 读侧逐点对称（以读侧校验点为准）：
-//   - 0x80 起 0x78 字节 LCG XOR 加密头（读侧 decryptR2004Header 只用其中
+//   - 0x80 起 0x78 字节 LCG XOR 加密头（读侧 DecryptR2004Header 只用其中
 //     0x54/0x5C 两字段，写出端同步维护 CRC32 及全部定位字段）；
 //   - 页表（page map）：签名 0x41630E3B 的 system section，内容为
 //     (id i32, size u32) 序列，页地址从 0x100 起按 size 累加；
@@ -145,27 +148,27 @@ type R2004SectionData struct {
 // 字节、页表页顺序、段表解压字节与各段解压数据，供 WriteDwgR2004 做文件级
 // 回放。仅在 R2004/R2010/R2013/R2018 解析路径填充（R2007 容器独立）。
 type R2004RawData struct {
-	// prefix 文件头明文区 [0x00,0x100) 原始字节：版本串、缩略图/摘要段
+	// Prefix 文件头明文区 [0x00,0x100) 原始字节：版本串、缩略图/摘要段
 	// 地址等（写出端仅回填 0x0D/0x20/0x24 三处段地址）。
 	Prefix [r2004HeaderPageSize]byte
-	// hdrPlain 解密后的 r2004 加密头明文 [0x80,0xF8)（写出端回填定位字段
+	// HdrPlain 解密后的 r2004 加密头明文 [0x80,0xF8)（写出端回填定位字段
 	// 并重算 CRC32 后重新加密）。
 	HdrPlain [R2004HdrPlainSize]byte
-	// pageOrder 页表页 id 按源顺序（已剔除 gap 与页表自身语义无关，仅用于
+	// PageOrder 页表页 id 按源顺序（已剔除 gap 与页表自身语义无关，仅用于
 	// 保持物理布局顺序；页表/段表两页的尺寸在写出时重算）。
 	PageOrder []int32
-	// sysmapID/infoID 页表自身与段表所在页的页 id（写回加密头 0x50/0x5C）。
+	// SysmapID/infoID 页表自身与段表所在页的页 id（写回加密头 0x50/0x5C）。
 	SysmapID int32
 	InfoID   int32
-	// infoBlob 段表（Section Info）解压字节，原样回放。
+	// InfoBlob 段表（Section Info）解压字节，原样回放。
 	InfoBlob []byte
-	// sections 各数据段素材（段表描述顺序）。
+	// Sections 各数据段素材（段表描述顺序）。
 	Sections []R2004SectionData
 }
 
-// CaptureR2004Raw 从 R2004+ 源文件提取回放素材（解析路径的一次性钩子）：
-// 走与读侧完全相同的解析链（decryptR2004Header→parsePageMap→段表→assembleSection），
-// 任一环节失败返回 nil（不阻断解析，仅失去文件级写出能力）。
+// CaptureR2004Raw 采集 R2004 系列容器的原始段和分页信息，供回放式导出。
+// 采集复用头部解密、页表解析和段装配流程；任一步失败返回 nil，
+// 由调用方决定是否继续其他解析工作。
 func CaptureR2004Raw(Data []byte) *R2004RawData {
 	if len(Data) < r2004HeaderPageSize || (len(Data) >= 6 && string(Data[:6]) == "AC1021") {
 		// R2007 容器结构独立，不在此捕获
@@ -173,7 +176,7 @@ func CaptureR2004Raw(Data []byte) *R2004RawData {
 	}
 	raw := &R2004RawData{}
 	copy(raw.Prefix[:], Data[:r2004HeaderPageSize])
-	// 解密 0x78 字节加密头（LCG XOR 与读侧 decryptR2004Header/lcgKeyStream 同源）
+	// 解密 0x78 字节加密头（LCG XOR 与读侧 DecryptR2004Header/lcgKeyStream 同源）
 	pad := R2004LCGPad(R2004HdrPlainSize)
 	for i := 0; i < R2004HdrPlainSize; i++ {
 		raw.HdrPlain[i] = Data[0x80+i] ^ pad[i]
@@ -249,10 +252,9 @@ func CaptureR2004Raw(Data []byte) *R2004RawData {
 			return nil
 		}
 		sec.Data = blob
-		// 逐页读取源数据页头（权威分页事实），并在读侧拼接视图中定位本页
-		// 解压流切片：压缩段按 maxDecomp 步进铺放（读侧逐页补齐），未压缩
-		// 段按源页载荷连续拼接；页流超出段 size 的尾部被读侧截断，切片同样
-		// 截到视图末尾即可保证回读一致
+		// 按源页面头确定页范围，并从已装配的段数据中提取页面内容。
+		// 压缩段按 maxDecomp 步进，未压缩段按载荷长度连续定位；超出段范围的
+		// 页面尾部截断到段数据末尾。
 		cursor := 0
 		for pi := range sec.Pages {
 			ref := &sec.Pages[pi]
@@ -264,10 +266,8 @@ func CaptureR2004Raw(Data []byte) *R2004RawData {
 			compSz := int(binary.LittleEndian.Uint32(h[8:]))
 			ref.StartOffset = uint64(binary.LittleEndian.Uint32(h[16:]))
 			if sec.Compressed == 2 {
-				// 读侧把每页解压流补齐到 maxDecomp 后顺序拼接，切片取整块
-				// （页头 decomp_size 并非流的真实长度，整块切片配合回读侧
-				// 同样的补齐/截断口径即可保证逐字节一致；块尾补零经 LZ77
-				// 压缩后只占数字节）
+				// 压缩段按 maxDecomp 取每页内容，与读取时的补齐和拼接规则一致。
+				// 页头 decomp_size 不直接作为此处切片长度。
 				ref.DataOff = pi * int(sec.maxDecomp)
 				ref.DataLen = int(sec.maxDecomp)
 			} else {
@@ -289,7 +289,7 @@ func CaptureR2004Raw(Data []byte) *R2004RawData {
 }
 
 // parseR2004SectionInfo 解析段表解压字节：5×u32 头 + 逐段 96 字节描述 +
-// 逐页 16 字节三元组（与读侧 parseSectionMap 字段偏移一致）。
+// 逐页 16 字节三元组（与读侧 ParseSectionMap 字段偏移一致）。
 func parseR2004SectionInfo(blob []byte) ([]R2004SectionData, error) {
 	if len(blob) < 20 {
 		return nil, fmt.Errorf("cad: 段表头截断")
@@ -365,31 +365,30 @@ type r2007SectionRaw struct {
 // R2007RawData R2007 容器的原始写出素材：解析时从源文件保留的头部、第二
 // 头部 34 字段、页表顺序与各段解压数据，供 WriteDwgR2007 做文件级回放。
 type R2007RawData struct {
-	// prefix 文件头 [0x00,0x80)：版本串与缩略图/摘要信息段地址等（写出端
+	// Prefix 文件头 [0x00,0x80)：版本串与缩略图/摘要信息段地址等（写出端
 	// 回填段地址）。
 	Prefix [R2007SecondHeaderOffset]byte
-	// headerGap [0x458,0x480) 的 0x28 字节间隔区（读侧跳过，源样回放）。
+	// HeaderGap [0x458,0x480) 的 0x28 字节间隔区（读侧跳过，源样回放）。
 	HeaderGap [0x28]byte
-	// fields 第二头部解压体 34×u64（写出端回填布局相关字段）。
+	// Fields 第二头部解压体 34×u64（写出端回填布局相关字段）。
 	Fields [34]uint64
-	// pageOrder 页表条目按源顺序（含页表/段表自身两页，物理布局顺序）。
+	// PageOrder 页表条目按源顺序（含页表/段表自身两页，物理布局顺序）。
 	PageOrder []R2007PageSlot
-	// sysmapID/secmapID 页表页与段表页的页 id。
+	// SysmapID/secmapID 页表页与段表页的页 id。
 	SysmapID int64
 	SecmapID int64
-	// pmCorr/smCorr 页表与段表系统页的 correction 冗余份数（参与块数推导，
-	// 保留源值使 RS 去交织块数与读侧口径完全一致）。
+	// PmCorr/smCorr 保存系统页的 correction 冗余参数，供写入时计算交织块数。
 	PmCorr uint64
 	SmCorr uint64
-	// sections 各段素材（段表顺序，含尾部空条目）。
+	// Sections 各段素材（段表顺序，含尾部空条目）。
 	Sections []r2007SectionRaw
-	// trailingEmpty 段表尾部是否存在空条目（data_size/name_length/
+	// TrailingEmpty 段表尾部是否存在空条目（data_size/name_length/
 	// num_pages 全零）：LibreDWG 对其报 "Invalid num_pages 0"（源文件基线
 	// 错误的一部分），写侧重建段表时原样补回以保持基线一致。
 	TrailingEmpty bool
 }
 
-// r2007DecodeHeaderBody 解出第二头部 34×u64 字段体（captureR2007Raw 专用，
+// r2007DecodeHeaderBody 解出第二头部 34×u64 字段体（CaptureR2007Raw 专用，
 // 与读侧 decodeR2007Header 同链但保留全量字段）。
 func r2007DecodeHeaderBody(Data []byte) ([34]uint64, error) {
 	var Fields [34]uint64
@@ -507,9 +506,8 @@ func r2007CaptureSectionMap(Data []byte, hdr r2007Header, Pages []R2007PageSlot)
 	return Sections, TrailingEmpty, nil
 }
 
-// CaptureR2007Raw 从 R2007 源文件提取回放素材（解析路径的一次性钩子）：
-// 走与读侧完全相同的解析链（第二头部→页表→段表→逐段装配），任一环节失败
-// 返回 nil（不阻断解析，仅失去文件级写出能力）。
+// CaptureR2007Raw 采集 R2007 容器的头部、页表及段数据，供回放式导出。
+// 采集复用第二头部解码和页面装配流程；任一步失败返回 nil。
 func CaptureR2007Raw(Data []byte) *R2007RawData {
 	if len(Data) < 6 || string(Data[:6]) != "AC1021" || uint64(len(Data)) < R2007StreamBaseOffset {
 		return nil

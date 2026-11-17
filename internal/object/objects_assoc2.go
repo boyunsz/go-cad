@@ -1,9 +1,9 @@
-// 本文件实现 ASSOC 关联族第二批内部对象（dwg2.spec）：
-// ASSOC2DCONSTRAINTGROUP、ASSOCVARIABLE、ASSOCVALUEDEPENDENCY、
-// ASSOCDIMDEPENDENCYBODY、ASSOCPATHACTIONPARAM 与 4 种
-// SURFACEACTIONBODY（AcDbAssocPathBasedSurfaceActionBody 公共体）。
-// gold JSON 中 pab.values/nodes 等数组以扁平键 pab.values[i].x 存取，
-// 与 flattenGold 的展平口径一致。
+// 本文件解析约束、变量、路径参数及曲面动作关联对象。
+//
+// 各解析器复用关联动作和求值变量的公共字段读取逻辑。嵌套数组以
+// 包含索引的字段路径保存，供统一字段访问与诊断导出使用。
+//
+// 格式参考：LibreDWG dwg2.spec 中对应的 ASSOC 对象定义。
 
 package object
 
@@ -14,12 +14,9 @@ import (
 	"github.com/boyunsz/go-cad/internal/objrec"
 )
 
-// decodeAssocActionFields AcDbAssocAction_fields 的 dat 流部分：
-// class_version BS（pre-R2010 为 1、R2013+ 为 2）+ geometry_status BL +
-// action_index BL + max_assoc_dep_index BL + num_deps BL +
-// deps[i].is_owned B×N + R2010+ 追加 4 个未收录字段（BS + BL
-// num_owned_params + BS + BL num_values，v9 实测同 ASSOCNETWORK）。
-// owningnetwork/actionbody/deps 句柄在 handle 流。
+// decodeAssocActionFields 读取 AcDbAssocAction 的主体字段。
+// 包括版本、几何状态、动作索引、依赖计数和归属标志；R2010 及之后版本
+// 另读参数和值计数相关字段。所属网络、动作体和依赖引用位于句柄流。
 func decodeAssocActionFields(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) (int, error) {
 	if err := fr.BS("class_version", g); err != nil {
 		return 0, err
@@ -75,9 +72,9 @@ func decodeAssocActionHandles(R *bitstream.BitStream, g *ObjGeneric, numDeps int
 	return nil
 }
 
-// DwgResbufValueType 复刻 LibreDWG dwg_resbuf_value_type 的 DXF 组码
-// → 值类型判定（'R'=REAL、'I'=INT32、'S'=INT16、'C'=INT8、'T'=STRING、
-// 'H'=HANDLE、'O'=OBJECTID(不读)、'X'=INVALID(不读)）。
+// DwgResbufValueType 根据 DXF 组码返回字段的值类型标识。
+// R、I、S、C、T、H 分别表示浮点数、32 位整数、16 位整数、8 位整数、
+// 字符串和句柄；O 和 X 分别表示对象 ID 和无效组码，由调用方决定处理方式。
 func DwgResbufValueType(gc int64) byte {
 	switch {
 	case gc >= 300:
@@ -237,7 +234,7 @@ func decodeEvalVariantFields(R *bitstream.BitStream, Ver container.DwgVersion, f
 	return isHandle, nil
 }
 
-// ---- ASSOC2DCONSTRAINTGROUP（dwg2.spec，AcDbAssocAction + 约束组）----
+// ASSOC2DCONSTRAINTGROUP（dwg2.spec，AcDbAssocAction + 约束组）。
 
 // decodeGenericASSOC2DCONSTRAINTGROUP 解析 ASSOC2DCONSTRAINTGROUP：
 // AcDbAssocAction_fields + version BL + b1 B + workplane 3BD×3 +
@@ -331,7 +328,7 @@ func decodeGenericASSOC2DCONSTRAINTGROUP_HDL(R *bitstream.BitStream, Ver contain
 	return nil
 }
 
-// ---- ASSOCVARIABLE（AcDbAssocAction + AcDbAssocVariable）----
+// ASSOCVARIABLE（AcDbAssocAction + AcDbAssocVariable）。
 
 // decodeGenericASSOCVARIABLE 解析 ASSOCVARIABLE：AcDbAssocAction_fields
 // + av_class_version BL + name/t58/evaluator/desc T + AcDbEvalVariant
@@ -379,7 +376,7 @@ func decodeGenericASSOCVARIABLE_HDL(R *bitstream.BitStream, Ver container.DwgVer
 	return nil
 }
 
-// ---- ASSOCVALUEDEPENDENCY / ASSOCDIMDEPENDENCYBODY ----
+// ASSOCVALUEDEPENDENCY / ASSOCDIMDEPENDENCYBODY。
 
 // decodeGenericASSOCVALUEDEPENDENCY 解析 ASSOCVALUEDEPENDENCY：与
 // ASSOCGEOMDEPENDENCY 同用 AcDbAssocDependency_fields（assocdep. 前缀）
@@ -407,7 +404,7 @@ func decodeGenericASSOCDIMDEPENDENCYBODY(R *bitstream.BitStream, Ver container.D
 	return fr.BS("class_version", g)
 }
 
-// ---- ASSOCPATHACTIONPARAM（AcDbAssocActionParam + Compound + Path）----
+// ASSOCPATHACTIONPARAM（AcDbAssocActionParam + Compound + Path）。
 
 // decodeGenericASSOCPATHACTIONPARAM 解析 ASSOCPATHACTIONPARAM：
 // is_r2013 BS（R2013b+ 置 1）+ [aap_version BL（R2013b+）] + name T +
@@ -450,7 +447,7 @@ func decodeGenericASSOCPATHACTIONPARAM_HDL(R *bitstream.BitStream, Ver container
 	return nil
 }
 
-// ---- SURFACEACTIONBODY 族（AcDbAssocPathBasedSurfaceActionBody）----
+// SURFACEACTIONBODY 族（AcDbAssocPathBasedSurfaceActionBody）。
 
 // decodeAcisValueParam 读 AcDbValueParam_fields（前缀如
 // "pab.values[0]."）：class_version BL + name T + unit_type BL +

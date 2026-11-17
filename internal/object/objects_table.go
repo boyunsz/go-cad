@@ -1,7 +1,9 @@
-// 本文件实现表记录类内部对象的解码：BLOCK_HEADER、LTYPE、9 个表
-// CONTROL、STYLE、VPORT、MLINESTYLE、DIMSTYLE、VX_CONTROL/
-// VX_TABLE_RECORD/CELLSTYLEMAP。各表记录按 R13-R14/R2000-R2004/
-// R2007+ 三档版本布局分流，字段序对照 dwgread -v9 位级日志。
+// 本文件解析符号表记录及其控制对象。
+//
+// 覆盖块、线型、文字样式、视口、多线样式、标注样式和其他辅助表记录。
+// 公共表字段与类型专用字段按 DWG 版本读取，句柄由对应的句柄流解析器处理。
+//
+// 格式参考：LibreDWG 的表记录定义。
 
 package object
 
@@ -35,7 +37,7 @@ func readCommonTableFlags(R *bitstream.BitStream, fr *GfRead, g *ObjGeneric, Ver
 	return nil
 }
 
-// ---- BLOCK_HEADER（dwg.spec DWG_TABLE(BLOCK_HEADER)，固定码 0x31）----
+// BLOCK_HEADER（dwg.spec DWG_TABLE(BLOCK_HEADER)，固定码 0x31）。
 
 // decodeGenericBLOCKHEADER BLOCK_HEADER 的 dat 流字段：
 // COMMON_TABLE_FLAGS（name + is_xref_resolved）+ 块标志位 + num_owned +
@@ -229,13 +231,11 @@ func (f *GfRead) RL(key string, g *ObjGeneric) error {
 	return nil
 }
 
-// ---- LTYPE（dwg.spec DWG_TABLE(LTYPE)，固定码 0x39）----
+// LTYPE（dwg.spec DWG_TABLE(LTYPE)，固定码 0x39）。
 
-// decodeGenericLTYPE 解析 LTYPE 线型表记录：
-// dat 流 = COMMON_TABLE_FLAGS + T description + BD pattern_len + RC alignment
-// + RCu numdashes + dashes×N（BD length + BS shapecode + ...，当前语料
-// numdashes 恒 0，dash 的 shape 细节后续按需扩展）；
-// handle 流 = owner + reactors + xdic + xref + dashes×N style。
+// decodeGenericLTYPE 读取线型表记录的公共标志、描述和图案参数。
+// 逐段读取长度、形状参数及标志，记录 dash_lengths 和 complex 字段；
+// 字符串区按版本读取。这里只保留已支持的线型数据，不生成复杂形状几何。
 func decodeGenericLTYPE(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	// COMMON_TABLE_FLAGS：name + is_xref_resolved（R2004+）/三字段（pre-R2004）
 	if err := fr.T("name", g); err != nil {
@@ -315,7 +315,7 @@ func (f *GfRead) RCv(key string, g *ObjGeneric) (int64, error) {
 	return int64(v), nil
 }
 
-// ---- 表 CONTROL 对象（BLOCK/LAYER/STYLE/LTYPE/VIEW/UCS/VPORT/APPID/DIMSTYLE_CONTROL）----
+// 表 CONTROL 对象（BLOCK/LAYER/STYLE/LTYPE/VIEW/UCS/VPORT/APPID/DIMSTYLE_CONTROL）。
 
 // controlSpec CONTROL 对象的差异描述。
 type controlSpec struct {
@@ -390,7 +390,7 @@ func decodeGenericCONTROL_HDL(R *bitstream.BitStream, Ver container.DwgVersion, 
 	return nil
 }
 
-// ---- STYLE（dwg.spec DWG_TABLE(STYLE)，固定码 0x35，文字样式表记录）----
+// STYLE（dwg.spec DWG_TABLE(STYLE)，固定码 0x35，文字样式表记录）。
 
 // decodeGenericSTYLE 解析 STYLE：
 // COMMON_TABLE_FLAGS（name + is_xref_resolved/pre-R2004 三字段）+
@@ -431,7 +431,7 @@ func decodeGenericSTYLE(R *bitstream.BitStream, Ver container.DwgVersion, fr *Gf
 	return fr.T("bigfont_file", g)
 }
 
-// ---- VPORT（dwg.spec DWG_TABLE(VPORT)，固定码 0x41，视口表记录）----
+// VPORT（dwg.spec DWG_TABLE(VPORT)，固定码 0x41，视口表记录）。
 // 三种版本布局，字段序均对照 dwgread -v9 位级日志逐字段校准
 // （example_r14 / example_2000 / example_2007）。
 
@@ -645,7 +645,7 @@ func (f *GfRead) FourBits(key string, g *ObjGeneric) error {
 	return nil
 }
 
-// ---- MLINESTYLE（dwg.spec，固定码 0x49，多线样式表记录）----
+// MLINESTYLE（dwg.spec，固定码 0x49，多线样式表记录）。
 
 // decodeGenericMLINESTYLE 解析 MLINESTYLE 的 dat 流：
 // T name + T description + BS flag + CMC fill_color + BD start_angle +
@@ -705,7 +705,7 @@ func (f *GfRead) BSv(key string, g *ObjGeneric) (int64, error) {
 	return int64(v), nil
 }
 
-// ---- DIMSTYLE（dwg.spec DWG_TABLE(DIMSTYLE)，固定码 0x45，标注样式表记录）----
+// DIMSTYLE（dwg.spec DWG_TABLE(DIMSTYLE)，固定码 0x45，标注样式表记录）。
 // 三种版本布局，字段序均对照 dwgread -v9 位级日志逐字段校准
 // （example_r14 / example_2000 / example_2018）。
 
@@ -806,10 +806,9 @@ func decodeDIMSTYLE_r14(fr *GfRead, g *ObjGeneric) error {
 	return fr.B("flag0", g)
 }
 
-// decodeDIMSTYLE_r2000 R2000-R2004 布局：DIMPOST/DIMAPOST TV 在
-// DIMSCALE 之前（v9 实测 @142/@144）；无 DIMFXL/DIMJOGANG/DIMTFILL 系
-// （SINCE R_2007a）；DIMLWD/DIMLWE 为 BSd 有符号（-2 = BB 00 + RS
-// 0xFFFE，18 位）；无 R2007+ 尾块。
+// decodeDIMSTYLE_r2000 读取 R2000–R2004 布局的标注样式字段。
+// DIMPOST 和 DIMAPOST 位于 DIMSCALE 之前；DIMLWD、DIMLWE 按有符号
+// BS 值处理。不读取 R2007 引入的填充、折弯等扩展参数。
 func decodeDIMSTYLE_r2000(fr *GfRead, g *ObjGeneric) error {
 	if err := fr.T("DIMPOST", g); err != nil {
 		return err
@@ -1043,7 +1042,7 @@ func decodeGenericDIMSTYLE_HDL(R *bitstream.BitStream, Ver container.DwgVersion,
 	return nil
 }
 
-// ---- VX_CONTROL/VX_TABLE_RECORD/CELLSTYLEMAP ----
+// VX_CONTROL/VX_TABLE_RECORD/CELLSTYLEMAP。
 
 // decodeGenericCELLSTYLEMAP 解析 CELLSTYLEMAP（类 527）：
 // BL num_cells + cells×N（BL id + BL type + T name）。

@@ -1,8 +1,11 @@
-// entities_image.go 实现批次 C 的 spec 级扩展实体：IMAGE（AcDbRasterImage，
-// 位布局与 WIPEOUT 完全同构）、OLE2FRAME/OLEFRAME（OLE 框架 + 二进制数据块）、
-// PROXY_ENTITY（ACAD 代理实体：元数据 + hdlpos 定界的原始数据位捕获）。
-// 位级布局对照 LibreDWG dwg.spec 对应 DWG_ENTITY 定义；
-// IMAGE 布局经 dwgread -v9 对 test-data 各版本 Leader.dwg 现场核对。
+// 本文件解析栅格图像、OLE、代理实体和底图引用的数据。
+//
+// IMAGE 保留图像定位及裁剪参数；OLE 实体保留框架信息和二进制数据；
+// PROXY_ENTITY 保留元数据及可定位的原始数据。UNDERLAY 保留引用定义、
+// 插入变换和裁剪边界。记录解析不等同于外部内容的实际渲染。
+//
+// 格式参考：LibreDWG 的 dwg.spec 和 dwg2.spec 中对应的实体定义。
+
 package entity
 
 import (
@@ -125,7 +128,7 @@ func decodeImageVer(r *bitstream.BitStream, Head *CommonEntityHead, ver containe
 
 }
 
-// ---- OLE2FRAME / OLEFRAME（OLE 对象框架，含二进制数据块）----
+// OLE2FRAME / OLEFRAME（OLE 对象框架，含二进制数据块）。
 
 // oleDataMaxSize OLE 数据块的防御性上限（错位候选的 data_size 常为天文数；
 // 真实 OLE 数据最大为嵌入了完整 OLE 流的记录，百 MB 级不可能出现）。
@@ -153,8 +156,8 @@ type EntOleFrame struct {
 
 // DecodeOle2FrameVer OLE2FRAME：type BS + [mode BS（R2000b+）] + data_size BL +
 // data TF + [lock_aspect RC（R2000b+）]（dwg.spec DWG_ENTITY (OLE2FRAME)）。
-// 注意 dwgVersion 枚举按容器路径排序（verR2000=0），R2000b+ 判定用
-// 「非 R13/R14」口径而非大小比较。
+// 注意 DwgVersion 枚举按容器路径排序（VerR2000=0），R2000b+ 判定用
+// 「非 R13/R14」规则而非大小比较。
 func DecodeOle2FrameVer(r *bitstream.BitStream, Head *CommonEntityHead, ver container.DwgVersion) (any, error) {
 	ole := &EntOle2Frame{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}
 	var err error
@@ -186,7 +189,7 @@ func DecodeOle2FrameVer(r *bitstream.BitStream, Head *CommonEntityHead, ver cont
 	return ole, nil
 }
 
-// ---- PROXY_ENTITY（ACAD 代理实体，固定类型码 0x1F2）----
+// PROXY_ENTITY（ACAD 代理实体，固定类型码 0x1F2）。
 
 // ProxyDataMaxBits 原始代理数据位捕获的防御性上限（错位候选的
 // objSizeBit 垃圾值会产生天文位长；真实代理数据上限为数 MB）。
@@ -213,7 +216,7 @@ type EntProxyEntity struct {
 // 或 dwg/maint BLx 对（R2018+）] + from_dxf B（R2000b+）+ proxy_data TF
 // （长度取公共头 preview_size）+ 原始数据位捕获（当前位置到 hdlpos 的全部
 // 位，即 LibreDWG DECODER 的 data_numbits/data）+ handle 流剩余句柄全量
-// 记为 objids（LibreDWG num_objids 循环口径）。
+// 记为 objids（LibreDWG num_objids 循环规则）。
 func decodeProxyEntityVer(r *bitstream.BitStream, Head *CommonEntityHead, dataEnd uint64, ver container.DwgVersion) (any, error) {
 	px := &EntProxyEntity{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}
 	var err error
@@ -261,7 +264,7 @@ func decodeProxyEntityVer(r *bitstream.BitStream, Head *CommonEntityHead, dataEn
 	}
 	Owner, Layer := decodeOwnerLayer(r, Head)
 	px.Owner, px.Layer = Owner, Layer
-	// handle 流剩余句柄全量收集（LibreDWG while(hdl_dat->byte < hdl_dat->size) 口径，
+	// handle 流剩余句柄全量收集（LibreDWG while(hdl_dat->byte < hdl_dat->size) 规则，
 	// 含尾部 CRC 字节被当作句柄的差异，与参考实现一致）
 	r.SetBitPos(Head.ObjSizeBit)
 	if _, _, e := ParseCommonEntityHandles(r, Head); e == nil {
@@ -304,12 +307,8 @@ func DecodeOleFrameVer(r *bitstream.BitStream, Head *CommonEntityHead, ver conta
 	return ole, nil
 }
 
-// EntUnderlay 底图引用实体（PDFUNDERLAY/DGNUNDERLAY/DWFUNDERLAY 共用
-// AcDbUnderlayReference 布局，dwg2.spec UNDERLAY_fields；字段序经
-// 2004/Underlay.dwg dwgread -v9 trace 现场核对：definition_id 位于
-// handle 流区，主体为 extrusion→ins_pt→angle→scale→flag→contrast→fade
-// →clip 顶点）。几何来自外部 PDF/DGN/DWF 文件，DWG 内仅存引用框变换
-// 与裁剪多边形。
+// EntUnderlay 保存 PDF、DGN 或 DWF 底图引用的定义句柄、插入变换和裁剪边界。
+// 图形内容位于外部底图文件中，DWG 记录只保存引用及其显示参数。
 type EntUnderlay struct {
 	BaseEntity
 	DefinitionID uint64   // PDFDEFINITION/DGNDEFINITION/DWFDEFINITION 硬指针（handle 流）
@@ -396,10 +395,8 @@ func decodeUnderlayVer(r *bitstream.BitStream, Head *CommonEntityHead) (any, err
 			CadTraceField(trOn, 0, r.TellBits(), fmt.Sprintf("clip[%d]", i), fmt.Sprintf("(%v,%v)", P.X, P.Y))
 		}
 	}
-	// 0.14 实测（2004/Underlay.dwg trace）：clip_verts 之后直接进
-	// handle 流；dwg2.spec 的 flag&16 clip_inverts 分支在本批语料的
-	// 0.14 解码器中不存在（flag=30 亦无 clip_inverts 输出），不对齐
-	// 该分支以免吞掉 handle 流起始位。
+	// 本解析分支在 clip_verts 后定位句柄流，不读取可选 clip_inverts。
+	// 此分支未覆盖反向裁剪顶点；不能据此推定相关布局不包含这些字段。
 	Owner, Layer := decodeOwnerLayer(r, Head)
 	u.Owner, u.Layer = Owner, Layer
 	// handle 流：公共序列后为 definition_id（code 340）

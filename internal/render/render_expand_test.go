@@ -1,5 +1,7 @@
-// Regression tests for recursive block expansion, cycle detection, instance
-// budgets, and mirrored insertion transforms.
+// 本文件验证递归块展开、循环引用保护、实例预算和镜像插入变换。
+//
+// 基础用例使用内存构造的文档；依赖本地样本的用例通过可选测试配置加载。
+
 package render
 
 import (
@@ -13,7 +15,7 @@ import (
 )
 
 // buildLineBlockDoc 构造测试文档：块定义 h 含 n 条水平 LINE（局部 x 0..9），
-// modelSpace 放 nIns 个 INSERT 引用该块（缩放 1、位置 (i*100, 0)）。
+// ModelSpace 放 nIns 个 INSERT 引用该块（缩放 1、位置 (i*100, 0)）。
 func buildLineBlockDoc(blockHandle uint64, nLines, nIns int) *drawing.Document {
 	inner := make([]any, 0, nLines)
 	for i := 0; i < nLines; i++ {
@@ -131,9 +133,8 @@ func TestLocalLargeSheetExpansion(t *testing.T) {
 		t.Fatalf("parse large-sheet fixture: %v", err)
 	}
 	sheets := DetectSheets(doc)
-	// LIM-L2 起残余内容兜底切分会把标准框之外的无框内容区（设计说明
-	// 页/图例表/系统图小页）作为补充 Sheet 追加在标准框之后，标准框
-	// 恒为清单前 9 张，展开质量回归只针对标准图框
+	// 此样本的标准图框位于识别清单前 9 项，后续项可能是补充区域。
+	// 本用例仅对标准图框检查展开后的图元数量。
 	if len(sheets) < 9 {
 		t.Fatalf("应至少识别 9 张标准图框，实际 %d", len(sheets))
 	}

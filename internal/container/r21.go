@@ -1,7 +1,8 @@
-// r21 解压器：R2007（AC1021）专用压缩算法，与 R2004 的 LZ77 变体不同。
-// 流结构：可选 0x20 引导 opcode → 循环「字面量长度 + 字面量 + 回溯引用
-// 块序列」。字面量块与回溯引用的拷贝均按字节序怪癖规则执行（2/3 字节块
-// 反序、16 字节块两半块交换），由 r21ChunkPermute 统一描述。
+// 本文件实现 R2007（AC1021）DWG 使用的 R21 解压器。
+//
+// 解码器依次处理字面量长度、字面量数据和回溯引用。字面量块的字节重排
+// 规则由 r21ChunkPermute 定义；该格式与 R2004 的 LZ77 变体分别处理。
+
 package container
 
 import (
@@ -212,9 +213,8 @@ func (d *r21Decoder) copyRuns() (litPending, litOpcode int, err error) {
 	}
 }
 
-// r21ChunkPermute n 字节块内输出第 j 字节对应的源字节偏移（R21 拷贝的
-// 字节序怪癖：2/3 字节块整体反序；16 字节块 = 两个 8 字节半块交换；
-// 1/4/8 字节块直序）。
+// r21ChunkPermute 返回 n 字节块中输出位置 j 对应的源字节偏移。
+// 2 或 3 字节块逆序，16 字节块交换两个 8 字节子块，其他长度保持顺序。
 func r21ChunkPermute(n, j int) int {
 	switch n {
 	case 2:
@@ -231,8 +231,9 @@ func r21ChunkPermute(n, j int) int {
 	}
 }
 
-// r21CopyPlan 余数长度 1..31 的拷贝组成：(块大小, 流内偏移) 序列，
-// 按数组顺序执行；块大小走 r21ChunkPermute 字节序规则。
+// r21CopyPlans 定义余数长度 1–31 对应的字面量复制计划。
+// 每项由块大小和流内偏移组成，按数组顺序执行；块内字节顺序由
+// r21ChunkPermute 确定。
 var r21CopyPlans = [32][]struct {
 	n  uint8
 	at uint8
@@ -271,7 +272,7 @@ var r21CopyPlans = [32][]struct {
 	{{1, 30}, {4, 26}, {8, 18}, {16, 2}, {2, 0}},
 }
 
-// emitBlock 按字节序怪癖从流内 srcAt 拷贝 n 字节到输出。
+// emitBlock 按 R21 字节重排规则，将 srcAt 起的 n 字节写入输出。
 func (d *r21Decoder) emitBlock(srcAt, n int) error {
 	for j := 0; j < n; j++ {
 		si := srcAt + r21ChunkPermute(n, j)
@@ -345,7 +346,7 @@ func DecompressR21(src []byte, dstSize int) ([]byte, error) {
 		if d.put+Length > dstSize {
 			break
 		}
-		// 字面量块：与回溯引用一样经由拷贝组合（含字节序怪癖）
+		// 按字面量块的长度和重排规则复制数据。
 		if err = d.emitChunk(d.at, Length); err != nil {
 			return nil, err
 		}

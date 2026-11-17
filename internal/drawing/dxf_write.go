@@ -1,33 +1,15 @@
-// dxf_write.go 实现 ASCII DXF 写出（WriteDXF）：将解析后的 Document 导出为
-// R2000 风格的 ASCII DXF（HEADER/TABLES/BLOCKS/ENTITIES/EOF 段）。
+// 本文件将 Document 导出为 ASCII DXF。
 //
-// 组码与值格式严格对齐 LibreDWG out_dxf.c 的输出约定：
-//   - 组码行右对齐 3 字符，行尾 CRLF（\r\n）
-//   - 浮点（组码 10-59/110-149/210-239/460-469 等）：%0.16G，NaN/Inf 归零，
-//     纯整数值追加 ".0"（对齐 dxf_print_rd）
-//   - 整数按组码区间定宽：60-79/170-179/270-299/370-409 用 %6i，
-//     80-99/420-449 用 %9i，160-169/450-459 用 %12i（对齐 dxf_format）
-//   - 句柄（5/330/340 等）：大写十六进制（FMT_H = %PRIX64）
-//   - 角度组码 50-54 以度输出（对齐 VALUE_BD 的 rad2deg 分支）
-//   - 实体公共头顺序：0 类型 → 5 句柄 → 330 owner → 100 AcDbEntity →
-//     [67] → 8 图层 → 62/420 颜色 → 100 子类
-//     （对齐 common_entity_handle_data.spec + common_entity_data.spec）
+// 输出包含 HEADER、TABLES、BLOCKS 和 ENTITIES 等段。目标版本由
+// DxfTargetVersion 决定：R13 及之后版本保留源版本标识，更早版本使用
+// AC1015。组码与值使用 CRLF 换行，句柄使用大写十六进制，角度以度输出。
 //
-// 覆盖实体（与渲染同源的模型空间主力实体）：LINE/CIRCLE/ARC/POINT/ELLIPSE/
-// LWPOLYLINE/TEXT/MTEXT/INSERT/ATTRIB/SOLID/TRACE/3DFACE/RAY/XLINE/SPLINE/
-// HATCH（含渐变段与种子点）/DIMENSION(7 类)/LEADER/MLINE/
-// POLYLINE_2D/3D/PFACE/MESH(含 VERTEX/SEQEND 聚合)/SHAPE/TOLERANCE/
-// VIEWPORT/IMAGE/WIPEOUT/REGION/3DSOLID/BODY(SAT 文本)/OLE2FRAME/
-// PROXY_ENTITY。已知取舍：ACIS SAB（version=2）无 SAT1 转换器跳过数据段
-// （骨架保留）；PROXY class_id/objids 与 OLE oleclient/框对角不在模型中
-// 省略；MLEADER 块内容经 ctx 段还原。
+// 导出保留可用的图层名、块名和块基点；缺失名称时生成占位名称。
+// 线型表使用内置线型，文字样式使用 Standard。ACIS SAB 数据不转换为
+// SAT 文本；支持范围以各实体写入分支为准。
 //
-// 已知限制：解析路径未保留线型名与文字样式名，写出时按固定值合成
-// （线型 ByBlock/ByLayer/Continuous、样式 Standard）；图层名/块名/块基点
-// 按 layerColors[].name 与 internalObjects[BLOCK_HEADER] 真值写出，缺失时
-// 兜底合成（图层 LAYER_<HEX>、块 *B<HEX>、基点 0,0,0）。pre-R13 文档同样
-// 按 R2000 风格写出，$ACADVER 输出 AC1015 以保持文件自洽；其图纸空间实体
-// 以 67=1 输出且按句柄去重。
+// 格式参考：LibreDWG 的 out_dxf.c 及实体组码定义。
+
 package drawing
 
 import (
@@ -103,8 +85,8 @@ type DxfWriter struct {
 	Err     error
 	alloc   *dxfHandleAlloc
 	verts   *dxfVertexIndex
-	Doc     *Document // 真名/块基点消费源（layerColors/internalObjects）
-	vpID    uint16    // VIEWPORT 69 组码 id 自增器（R2000+ 口径）
+	Doc     *Document // 真名/块基点消费源（LayerColors/InternalObjs）
+	vpID    uint16    // VIEWPORT 69 组码 id 自增器（R2000+ 规则）
 }
 
 // Fail 记录首个错误。
@@ -169,7 +151,7 @@ func (x *DxfWriter) flt(code int, v float64) {
 // dxfFormatFloat 对齐 LibreDWG（DXF_PRECISION=16）的浮点格式化。
 func dxfFormatFloat(v float64) string {
 	if math.IsNaN(v) || math.IsInf(v, 0) {
-		v = 0 // 错位解码常产生非法值，写出 0 保证 DXF 可读
+		v = 0 // 将非有限浮点数替换为 0，避免输出无效数值。
 	}
 	s := strconv.FormatFloat(v, 'G', 16, 64)
 	t := strings.TrimPrefix(s, "-")
@@ -235,12 +217,12 @@ func (x *DxfWriter) vec3(code int, p entity.Point3) {
 	x.flt(code+20, p.Z)
 }
 
-// radDeg 写角度组码（50-54）：弧度 → 度（对齐 VALUE_BD 的 rad2deg 分支）。
+// radDeg 写角度组码（50-54）：弧度 → 度（对齐 VALUE_BD 的 Rad2deg 分支）。
 func (x *DxfWriter) radDeg(code int, rad float64) {
 	x.flt(code, Rad2deg(rad))
 }
 
-// ---- HEADER 段 ----
+// HEADER 段。
 
 // writeHeader HEADER 段：版本、代码页、插入基点与图幅范围。
 func (x *DxfWriter) writeHeader(doc *Document) {
@@ -272,8 +254,8 @@ func DxfTargetVersion(doc *Document) string {
 	return doc.Ver.VerString()
 }
 
-// dxfCodepageName 代码页 → DXF 代码页名（31/39 为简体中文 GBK，其余按
-// windows-1252 家族处理，与解码口径 decodeCodepage 一致）。
+// dxfCodepageName 将码页编号转换为当前导出器使用的 DXF 码页名称。
+// 31 和 39 输出 ANSI_936，其余编号输出 ANSI_1252。
 func dxfCodepageName(cp uint16) string {
 	switch cp {
 	case 31, 39:
@@ -284,7 +266,7 @@ func dxfCodepageName(cp uint16) string {
 }
 
 // docBounds 模型空间（含最大块启发式内容与 INSERT 展开）的 2D 包围盒：
-// 复用渲染的 tessellator 展开与鲁棒包围盒（抗错位解码的离群坐标）；
+// 复用渲染的 Tessellator 展开与鲁棒包围盒（抗错位解码的离群坐标）；
 // 空图时返回 (0,0,0,0)。
 func docBounds(doc *Document) (minX, minY, maxX, maxY float64) {
 	prims := NewTessellator(doc).ExpandAll()
@@ -298,10 +280,10 @@ func docBounds(doc *Document) (minX, minY, maxX, maxY float64) {
 	return bb.MinX, bb.MinY, bb.MaxX, bb.MaxY
 }
 
-// ---- TABLES 段 ----
+// TABLES 段。
 
-// writeTables TABLES 段：LTYPE（内建三件套，必须先于 LAYER）+ LAYER。
-// 解析路径未保留符号表名，图层名按句柄合成、颜色取解析结果。
+// writeTables 输出内置线型表及图层表，线型表位于图层表之前。
+// 图层名称和颜色优先使用文档中的记录；缺少名称时按句柄生成名称。
 func (x *DxfWriter) writeTables(doc *Document) {
 	x.str(0, "SECTION")
 	x.str(2, "TABLES")
@@ -334,10 +316,8 @@ func (x *DxfWriter) writeTables(doc *Document) {
 		x.str(100, "AcDbLayerTableRecord")
 		x.str(2, lr.Name)
 		x.codeValue(70, 0)
-		// 颜色语义与渲染取色同口径（layerRenderColor）：32 位值低 24 位
-		// ≤0xFF 为 ACI 索引形（方法字节 0xC3/0xC1），写 group 62 索引色；
-		// >0xFF 才是 RGB 真彩形，写 group 420。索引形误写 420 会把索引
-		// 当真彩输出错误颜色（消防图层 ACI 1~8 彩色系实证）。
+		// 按 LayerRenderColor 使用的颜色分类规则输出图层颜色。
+		// 低 24 位不超过 0xFF 时作为索引写入组码 62，否则写入真彩色组码 420。
 		if low := lr.TrueColor & 0x00FFFFFF; lr.TrueColor > 0 && low > 0xFF {
 			x.codeValue(420, int64(lr.TrueColor))
 		} else if lr.Index != 0 && lr.Index != 256 {
@@ -378,7 +358,7 @@ type dxfLayerRecord struct {
 }
 
 // dxfLayerName 图层句柄 → 合成名（0 层为 "0"，其余 LAYER_<HEX>）；
-// 仅供真名缺失时的兜底，写出侧统一走 dxfWriter.layerName。
+// 仅供真名缺失时的回退，写出侧统一走 DxfWriter.layerName。
 func dxfLayerName(h uint64) string {
 	if h == 0 {
 		return "0"
@@ -396,7 +376,7 @@ func (x *DxfWriter) layerName(h uint64) string {
 }
 
 // dxfBlockRealName 块定义句柄 → BLOCK_HEADER 真名（DWG/JSON/DXF 三来源
-// 均经 internalObjects 登记）；缺失返回空串。
+// 均经 InternalObjs 登记）；缺失返回空串。
 func (x *DxfWriter) dxfBlockRealName(h uint64) string {
 	if g := x.Doc.InternalObjs[h]; g != nil {
 		if s, ok := g.Field("name").(string); ok {
@@ -499,7 +479,7 @@ func (x *DxfWriter) ltypeRecord(handle uint64, name, desc string) {
 	x.flt(40, 0)
 }
 
-// ---- BLOCKS 段 ----
+// BLOCKS 段。
 
 // dxfBlockName 块定义句柄 → 合成块名（INSERT 组码 2 与 BLOCKS 段共用）。
 func dxfBlockName(blockHeader uint64) string {
@@ -646,7 +626,7 @@ func (x *DxfWriter) blockEnd(handle, ownerRecord uint64) {
 	x.str(100, "AcDbBlockEnd")
 }
 
-// ---- ENTITIES 段 ----
+// ENTITIES 段。
 
 // writeEntities ENTITIES 段（含 SECTION/ENDSEC 包夹）。
 func (x *DxfWriter) writeEntities(list []any, pspace bool) {
@@ -735,7 +715,7 @@ func (x *DxfWriter) colorWrite(base *entity.BaseEntity) {
 	}
 }
 
-// styleWrite 输出文字样式名（组码 7）：解析路径未保留 STYLE 表，恒 Standard。
+// styleWrite 将文字样式组码 7 写为 Standard；此导出路径不恢复原文字样式名称。
 func (x *DxfWriter) styleWrite() {
 	x.str(7, "Standard")
 }
@@ -1080,7 +1060,7 @@ func (x *DxfWriter) writeEntity(ent any, pspace bool) {
 	}
 }
 
-// dxfBinaryChunks 二进制组码分块输出（VALUE_BINARY 口径：每行 127 字节、
+// dxfBinaryChunks 二进制组码分块输出（VALUE_BINARY 规则：每行 127 字节、
 // 大写十六进制；空数据输出一行空值）。
 func (x *DxfWriter) dxfBinaryChunks(code int, data []byte) {
 	if len(data) == 0 {
@@ -1139,13 +1119,10 @@ func (x *DxfWriter) writeProxyEntity(e *entity.EntProxyEntity, pspace bool) {
 	x.dxfBinaryChunks(310, e.Data)
 }
 
-// writeAcis REGION/3DSOLID/BODY 写出：组码对照
-// dwg.spec ACTION_3DSOLID 的 DXF 分支（dxf_3dsolid）与 dwgread 实测：
-// 290 acis_empty + 70 version（恒 1，DXF 只承载 SAT 文本）+ 组码 1 逐行
-// SAT。entAcis.acisData 为解混淆文本，DXF 行须为加密态——按自反变换
-// （b≤32 保留、否则 159-b）再加密后输出，行内 '^' 转义为 "^ "（in_dxf
-// 读回还原为明文 'A'）。version=2（SAB 二进制）需完整 ACIS 编解码器
-// 才能转 SAT1，如实跳过数据段（实体骨架保留）。
+// writeAcis 将 REGION、3DSOLID 或 BODY 的 SAT 文本写入 DXF。
+// 输出 acis_empty、版本号和逐行文本；文本按 159-b 变换恢复存储编码，
+// 并处理行内转义。SAB 二进制载荷需要转换为 SAT，此处仅保留实体骨架，
+// 不输出 SAB 数据段。格式参考：dwg.spec 的 ACTION_3DSOLID DXF 分支。
 func (x *DxfWriter) writeAcis(e *entity.EntAcis, pspace bool) {
 	record := e.Kind
 	if record == "" {
@@ -1173,12 +1150,9 @@ func (x *DxfWriter) writeAcis(e *entity.EntAcis, pspace bool) {
 	}
 }
 
-// writeViewport 视口写出（组码与顺序对照 dwg.spec
-// DWG_ENTITY (VIEWPORT) 的 DXF 分支与 dwgread 实测输出）：10-30 中心/
-// 40-41 宽高/68-69 开关与 id/12-15 视图捕捉网格点/16-17 视向与目标/
-// 42-45 镜头前后裁剪视高/50-51 角度（度）/72 圆缩放/90 状态/1 样式表/
-// 281 渲染模式/71/74 UCS 标志/110-112 UCS 三轴/79 正交视图/146 标高；
-// 170 阴影模式与 61 网格主数非零才输出（版本条件组码，对齐 SINCE 分支）。
+// writeViewport 将视口几何、显示状态、UCS 和裁剪参数写入 DXF。
+// 角度转换为度，部分可选参数仅在非零时输出。
+// 组码参考：dwg.spec 的 VIEWPORT DXF 分支。
 func (x *DxfWriter) writeViewport(e *entity.EntViewport, pspace bool) {
 	x.entityHead(&e.BaseEntity, "VIEWPORT", pspace)
 	x.subclass("AcDbViewport")
@@ -1186,7 +1160,7 @@ func (x *DxfWriter) writeViewport(e *entity.EntViewport, pspace bool) {
 	x.flt(40, e.Width)
 	x.flt(41, e.Height)
 	// 68/69：无归属（owner=0，paperspace 总视口）恒 0；其余 on_off=1、
-	// id 按 R2000+ 口径自增（对齐 spec DXF 分支 last_viewport_id）
+	// id 按 R2000+ 规则自增（对齐 spec DXF 分支 last_viewport_id）
 	onOff, id := 0, 0
 	if e.Owner != 0 || e.Mode == 1 || pspace {
 		onOff = 1
@@ -1286,14 +1260,14 @@ func (x *DxfWriter) dxfLongText(text string) {
 	x.str(1, string(b[cut:]))
 }
 
-// ---- 多段线聚合 ----
+// 多段线聚合。
 
 // dxfVertexIndex 全文档 2D/3D 顶点索引（POLYLINE 聚合用）。
 type dxfVertexIndex struct {
 	v2 map[uint64]*entity.EntVertex2d
 	v3 map[uint64]*entity.EntVertex3d
-	// PFACE/MESH 顶点按宿主句柄分组（entVertexPface 定位顶点 +
-	// entVertexPfaceFace 面记录），与 vpAll 句柄索引互为补充
+	// PFACE/MESH 顶点按宿主句柄分组（EntVertexPface 定位顶点 +
+	// EntVertexPfaceFace 面记录），与 vpAll 句柄索引互为补充
 	vp    map[uint64][]any
 	vpAll map[uint64]any
 }
@@ -1406,11 +1380,9 @@ func (x *DxfWriter) writePolyline3d(e *entity.EntPolyline3d, pspace bool) {
 	x.seqend(e.Handle, pspace)
 }
 
-// writePolylinePface 面网格多段线：POLYLINE 头
-// （70=64 + 71/72 顶点/面计数）+ 定位顶点（AcDbPolyFaceMeshVertex，
-// 70=流内 flag，DWG 实测 192）+ 面记录（AcDbFaceRecord，70=128 +
-// 71-74 顶点索引）+ SEQEND。顶点实体按 owner 归属分组消费，组码对照
-// dwg.spec POLYLINE_PFACE/VERTEX_PFACE/VERTEX_PFACE_FACE 的 DXF 分支。
+// writePolylinePface 写入多面网格的 POLYLINE 头、顶点、面索引和 SEQEND。
+// 定位顶点保留流内标志，面索引记录使用标志 128；顶点按所属实体分组。
+// 组码参考：dwg.spec 的 POLYLINE_PFACE、VERTEX_PFACE 和 VERTEX_PFACE_FACE。
 func (x *DxfWriter) writePolylinePface(e *entity.EntPolylinePface, pspace bool) {
 	x.entityHead(&e.BaseEntity, "POLYLINE", pspace)
 	x.subclass("AcDbPolyFaceMesh")
@@ -1507,7 +1479,7 @@ func (x *DxfWriter) seqend(owner uint64, pspace bool) {
 	x.str(8, "0")
 }
 
-// ---- HATCH ----
+// HATCH。
 
 // writeHatch 输出填充：边界路径统一按“多段线路径”形式（渲染同源的细分
 // 点列）写出；图案定义按解析结果输出（solidFill 时读者无需图案段）。
@@ -1562,10 +1534,8 @@ func (x *DxfWriter) writeHatch(e *entity.EntHatch, pspace bool) {
 			}
 		}
 	}
-	// 种子点（98 + 10/20）与渐变填充段：极限批次 A 补齐（此前写侧
-	// 未建模）。组码与顺序对照 dwg.spec HATCH 主体尾部与
-	// _HATCH_gradientfill（out_dxf 同序）：98 → 450/451/460/461/452/
-	// 462/453/463+63/421 逐色 → 470。
+	// 写入种子点及渐变填充参数。
+	// 顺序为 98 → 450/451/460/461/452/462/453 → 各颜色项 → 470。
 	x.codeValue(98, int64(len(e.Seeds)))
 	for _, s := range e.Seeds {
 		x.pt2(10, s)
@@ -1601,7 +1571,7 @@ func BoolToInt(b bool) int64 {
 	return 0
 }
 
-// ---- DIMENSION ----
+// DIMENSION。
 
 // dxfDimSubclass 标注 DXF 70 低 3 位类型 → 子类名（与 dimFlag 合成规则对应）。
 func dxfDimSubclass(flag uint8) string {

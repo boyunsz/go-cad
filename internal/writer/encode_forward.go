@@ -1,17 +1,9 @@
-// encode_forward.go 实现结构化正向写出层（dwgwrite 第三代编码方向）：
-// 无容器回放素材（r2000Raw/r2004Raw/r2007Raw 均为 nil）的 drawing.Document——
-// 即 ParseJSON / ParseDXF / 手工合成来源——按位流规范正向编码为 R2000
-// （AC1015）容器 DWG。与 encode_object.go 的「原始位串回放」方案互补：
-// 那是同版本位级往返，这里是跨来源结构重建（等价 LibreDWG dxf2dwg /
-// dwgwrite -I json 的核心正向路径，对照其 encode.c 正向编码流程）。
+// 本文件将 Document 中的结构化实体和对象编码为 R2000（AC1015）DWG。
 //
-// 主要模块划分：
-//   - writeDwgForwardR2000：文件级组装（头部 → 段目录 → HeaderVars 段
-//     （内嵌最小合法模板）→ Classes 段（空类表）→ 对象区 → 对象图）
-//   - 实体侧正向编码器族 forwardEntityEncoders：公共头（handle/color/
-//     layer 系 → handle 流）+ 16 类渲染同源主力实体的 body 字段位流
-//   - 对象侧最小集：LAYER（表记录）与 DICTIONARY 的正向编码
-//   - 位流辅助：BT/BE/3BD/DD 等读写原语的编码侧对称 + bitsize 两遍回填
+// 此路径用于 JSON、DXF 或程序构造的文档，不依赖原始容器字节。
+// 编码流程包括头变量、类表、实体与对象记录、对象图和文件目录组装。
+// 支持范围由各实体及对象编码器决定，不能据此推定所有源格式数据均可保留。
+
 package writer
 
 import (
@@ -27,23 +19,21 @@ import (
 	"sort"
 )
 
-// forwardR2000FixedHeader example_2000.dwg 文件头 [0x00,0x15) 模板：版本串
-// AC1015 + 未知区 + 码页。写出端回填 0x13 处 RS 码页（读侧 readCodepage
-// 读取位），保证 detectVersion / readCodepage 与真实文件同构。
+// forwardR2000FixedHeader 保存结构化 R2000 写出使用的固定文件头模板。
+// 版本标识为 AC1015，码页在写出时回填到偏移 0x13。
 var forwardR2000FixedHeader = [0x15]byte{
 	'A', 'C', '1', '0', '1', '5',
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x01, 0xDC, 0x00, 0x00, 0x00, 0x21, 0x1D,
 	0x1E, 0x00, // RS codepage=30（ANSI_1252），写出端按 doc.codepage 回填
 }
 
-// forwardHeaderVarsB64 example_2000.dwg 的 HeaderVars 段整段字节（含前后
-// 哨兵、RL size、RC 版本串、全量 R2000 图纸变量位流与段级 CRC），base64
-// 内嵌。R2000 图纸变量共 129 项且位序随版本固定，逐项实现编码器收益低；
-// 真实文件的合法段字节即最小模板——变量中的句柄指向的对象在正向场景
-// 允许缺席（LibreDWG 读侧按 ref 悬空告警继续），本包读侧不解析该段。
+// forwardHeaderVarsB64 保存结构化 R2000 写出使用的头变量段模板。
+// 模板以 Base64 嵌入，包含哨兵、长度、变量位流和校验值。
+// 此路径复用模板数据，不会逐项编码输入文档中的所有头变量；模板内引用
+// 也不表示相应对象已在输出文件中创建。
 var forwardHeaderVarsB64 = "z3sfI/3eOKlffGi4Tm0zXxwCAAAAAAcAH79V0JVAm0AqpSAtPNQ0QEzAtAkEpAaqkIQZBkGQZBkGQNRpQEEkyQAAAAAAABZQFqqqqoAAAAAAAA4D8AAAAAAAANEBQIuADqdCUAJrmMwQL4UlAAAE18BiAil8AgDil8AwIL51GKURFRFVEnURiqECMtXgdrxVEECMtXgdrxVEECMtXgdrxVEECMtXgdrxXEECMtXgdrxXEECMtXgdrxXEAAAAAGhmGcAAAABgZmYZwAAAAMDMEHFAAAAAjZkxakCqamUFCUKqqqqqqhdzbcIN3NEwQn1PYtY4U5wTrLX0rkFhrwB8DigL6EAqQQ8kNuDfBQwQTrLX0rkFhrQAAAAAAAAAAAAAAAAAAAAAAAAAAAAEB6QAAAAAAAkHJAqmplBQlCqqqqqqkAAAAAAAABEAAAAAAAAA5D8AAAAAAAADkAAAAAAAAA9D+qAQFCIAAAAAAAABEAAAAAAAAABECHWGQqFQKKQ/ZAAAAAAAAOQ/iBxVIEgSBIHSBJZRIRRA1ERUFBQUD+/z+/zEBMQIxAzEFMQYxBzEIMQkxCjIC0VENURcxDEBUalEaURlRDgdKgAAQSSd7RkRFQUQ1NzgtQTY1Mi0xMUQyLTlBMzUtMDA2MDA4OUIzQTNGfQBJ3syOUNFREY5Ny00NTJGLUFCNEYtOUE1QS1FNTdFODMyOTA2MzJ9AFFVUR9RFVEUURYhYEoiw0c0mJ6cNjCE4NwCIcdWoIOXR7GSzKA="
 
-// forwardEntityCode 正向写出的实体类型码（objTypeCode 静态表的写出侧
+// forwardEntityCode 正向写出的实体类型码（ObjTypeCode 静态表的写出侧
 // 子集，覆盖渲染同源主力实体与块结构标记）。
 var forwardEntityCode = map[string]uint16{
 	"TEXT":              0x01,
@@ -183,7 +173,7 @@ var forwardDynamicClassOrder = []struct {
 }
 
 // fwdDynamicEntityKind 实体 → 动态类注册名（非动态类返回空串）。动态类
-// 的类型码不在 objTypeCode 静态表，写出需类段注册的动态码。
+// 的类型码不在 ObjTypeCode 静态表，写出需类段注册的动态码。
 func fwdDynamicEntityKind(ent any) string {
 	switch t := ent.(type) {
 	case *entity.EntWipeout:
@@ -208,9 +198,8 @@ type fwdObject struct {
 	body   []byte
 }
 
-// fwdEntityKind 按 Go 类型推导实体的写出类型名与类型码（不依赖
-// baseEntity.typeName：DXF 来源未填充该字段，且 JSON 的 DIMENSION_ 全名
-// 需归一为内部短名）。返回空串表示无正向编码器。
+// fwdEntityKind 根据实体的 Go 类型确定写出名称和类型码。
+// 不依赖来源名称字段，并将标注类型归一到对应名称；无编码器时返回空名称。
 func fwdEntityKind(ent any) (string, uint16) {
 	switch ent.(type) {
 	case *entity.EntLine:
@@ -308,7 +297,7 @@ func fwdEntityKind(ent any) (string, uint16) {
 }
 
 // dimensionKindName DIMENSION 输出标志低 3 位 → 内部短名（与读侧
-// decodeEntityFieldsVer 的类型码分派一致）；7（未知子类）返回空串。
+// DecodeEntityFieldsVer 的类型码分派一致）；7（未知子类）返回空串。
 func dimensionKindName(dimFlag uint8) string {
 	switch dimFlag & 0x7 {
 	case 0:
@@ -329,7 +318,7 @@ func dimensionKindName(dimFlag uint8) string {
 	return ""
 }
 
-// fwdDimLayout DIMENSION 子类标志 → 读侧类型专属尾部布局（dimSpecificLayout）。
+// fwdDimLayout DIMENSION 子类标志 → 读侧类型专属尾部布局（DimSpecificLayout）。
 func fwdDimLayout(dimFlag uint8) entity.DimSpecificLayout {
 	switch dimFlag & 0x7 {
 	case 1:
@@ -375,7 +364,7 @@ func fwdExtraVec(b *entity.BaseEntity, key string, def entity.Point3) entity.Poi
 	return def
 }
 
-// ---- 位流编码辅助（读写原语的编码侧对称） ----
+// 位流编码辅助（读写原语的编码侧对称）。
 
 // writeBT 位厚度：R2000+ 形式（1 位 mode，1 → 0.0，否则 BD）。
 func writeBT(w *bitstream.EncWriter, v float64) {
@@ -446,7 +435,7 @@ func nearestACI(rgb uint32) uint16 {
 // sq8 差的平方（nearestACI 专用）。
 func sq8(d int) int { return d * d }
 
-// writeForwardColor 颜色段 ENC 编码（parseEntityColorHead 的逆过程）：
+// writeForwardColor 颜色段 ENC 编码（ParseEntityColorHead 的逆过程）：
 // 11 → ByLayer 256、10 → ByBlock 0、01+RC → 单字节索引、否则 RS 完整值。
 // 真彩先降维为最近 ACI；无颜色信息按 ByLayer。
 func writeForwardColor(w *bitstream.EncWriter, c entity.EntColor) {
@@ -503,7 +492,7 @@ func patchRL(w *bitstream.EncWriter, bitOff uint64, v uint32) {
 	}
 }
 
-// ---- 实体 body 正向编码 ----
+// 实体 body 正向编码。
 
 // encodeForwardEntityBody 将单个实体正向编码为 R2000 记录 body 位流
 // （字节对齐）：BS 类型码 + RL bitsize（占位后回填，两遍法）+ 公共头 +
@@ -716,7 +705,7 @@ func encFwdText(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error
 
 // encFwdMText MTEXT：插入点/挤出/轴向量 3BD×3 + 矩形宽/字高 BD +
 // 附加/流向 BS + 范围 BD×2 + 文本 + 行距样式/因子 + 未知位（顺序对照
-// decodeMTextVer 的 R2000 分支；R2004+ 背景段不写）。
+// DecodeMTextVer 的 R2000 分支；R2004+ 背景段不写）。
 func encFwdMText(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	e := ent.(*entity.EntMText)
 	write3BD(w, e.Insertion)
@@ -838,7 +827,7 @@ func encFwdInsert(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error
 }
 
 // encFwdInsertHandles INSERT handle 流附加：块头句柄 + [R13~R2000 语义的
-// 首/末属性句柄与 SEQEND]（对照 decodeInsert 的 handle 流消费顺序；
+// 首/末属性句柄与 SEQEND]（对照 DecodeInsert 的 handle 流消费顺序；
 // 无属性时仅块头）。
 func encFwdInsertHandles(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	e := ent.(*entity.EntInsert)
@@ -859,7 +848,7 @@ func encFwdInsertHandles(w *bitstream.EncWriter, ent any, ver container.DwgVersi
 }
 
 // encFwdAttrib ATTRIB：TEXT 同构字段（值文本）+ 标签串 + 字段长度 +
-// 标志（对照 decodeAttribVer 的 R2000 分支）。
+// 标志（对照 DecodeAttribVer 的 R2000 分支）。
 func encFwdAttrib(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	e := ent.(*entity.EntAttrib)
 	encFwdTextFields(w, textFieldSource{
@@ -948,11 +937,8 @@ func encFwdPolyline2d(w *bitstream.EncWriter, ent any, _ container.DwgVersion) e
 	return nil
 }
 
-// encFwdPolylineHandles POLYLINE_2D handle 流附加：首/末顶点句柄
-// （R13~R2000 语义；R2004+ 读侧不消费，写不写均可，保持结构完整）。
-// encFwdPolylineHandles POLYLINE_2D handle 流附加：R13~R2000 语义的
-// 首/末顶点句柄 + SEQEND 占位（JSON 来源缺省空引用，顶点经 owner 归属
-// 聚合还原；读侧保存 seqend 供 gold 对照，值不参与渲染）。
+// encFwdPolylineHandles 写入二维多段线的顶点和结束标记引用。
+// R13–R2000 写入首末顶点句柄，随后写入 SEQEND 占位引用。
 func encFwdPolylineHandles(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	e := ent.(*entity.EntPolyline2d)
 	if ver == container.VerR13 || ver == container.VerR14 || ver == container.VerR2000 {
@@ -974,20 +960,18 @@ func encFwdBlock(w *bitstream.EncWriter, ent any, ver container.DwgVersion) erro
 	return nil
 }
 
-// ---- 极限批次 E：实体编码器续作（对照各实体读侧解码器的 R2000 布局） ----
+// 补充实体的 R2000 字段编码。
 
-// encFwdSpline SPLINE：scenario BL + degree BL + 拟合点/控制点双模式数据
-// （对照 parseSplineFitData/parseSplineControlData 的 R2000 布局）。
-// 控制点模式：rational/closed/periodic 3 位 + 两容差 + 节点/控制点计数 +
-// weighted 回显位 + 数组；拟合点模式：拟合容差 + 起末切线（结构化来源
-// 无字段，零向量占位）+ 拟合点数组。
+// encFwdSpline 按 R2000 字段布局写入样条的拟合点或控制点数据。
+// 控制点模式写入标志、容差、节点及权重；拟合点模式写入拟合容差和点列，
+// 起末切线在当前写出路径中使用零向量。
 func encFwdSpline(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	e := ent.(*entity.EntSpline)
 	w.WriteBL(e.Scenario)
 	w.WriteBL(e.Degree)
 	if e.Scenario == 2 {
 		w.WriteBD(e.FitTolerance)
-		write3BD(w, entity.Point3{}) // beg_tan_vec：JSON/DXF 来源未建模，零占位
+		write3BD(w, entity.Point3{}) // 当前写出路径将起始切线写为零向量。
 		write3BD(w, entity.Point3{}) // end_tan_vec
 		w.WriteBL(uint32(len(e.FitPoints)))
 		for _, p := range e.FitPoints {
@@ -1131,7 +1115,7 @@ func encFwdHatch(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error 
 	return nil
 }
 
-// writeBL 路径 flag 的 BL 别名（可读性：hatchPath.flag 为 uint32）。
+// writeBL 路径 flag 的 BL 别名（可读性：HatchPath.flag 为 uint32）。
 func writeBL(w *bitstream.EncWriter, v uint32) { w.WriteBL(v) }
 
 // encFwdRay RAY/XLINE：3BD 起点 + 3BD 单位方向。
@@ -1194,9 +1178,8 @@ func splitEven(arr []float64, n int) [][]float64 {
 	return out
 }
 
-// encFwdMLine MLINE：比例/对齐 RC + 基点与挤出 3BD 占位 + 开闭标志 +
-// 线数 RC + 顶点数组（位置/方向/miter 3BD×3 + 逐线段/区域参数计数式数组）
-// （对照 decodeMline；基点/挤出 JSON 来源未建模，零占位）。
+// encFwdMLine 写入多线的比例、对齐方式、开闭标志及顶点和线参数。
+// 当前写出路径将基点和挤出方向写为零向量，不恢复实体中的这两个字段。
 func encFwdMLine(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	m := ent.(*entity.EntMLine)
 	w.WriteBD(m.Scale)
@@ -1241,7 +1224,7 @@ func encFwdMLineHandles(w *bitstream.EncWriter, ent any, _ container.DwgVersion)
 }
 
 // encFwdTolerance TOLERANCE（R2000 无 R13/R14 头）：插入点/对称轴/挤出
-// 3BD×3 + 标注文本内联 TV（对照 decodeToleranceVer 的非 R13/R14 分支）。
+// 3BD×3 + 标注文本内联 TV（对照 DecodeToleranceVer 的非 R13/R14 分支）。
 func encFwdTolerance(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	t := ent.(*entity.EntTolerance)
 	write3BD(w, t.Insertion)
@@ -1280,7 +1263,7 @@ func encFwdShape(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error 
 // encFwdViewport VIEWPORT（R2000 布局）：中心/宽高 + 视图目标/方向 + 视角
 // 尺寸/镜头/前后裁剪/捕捉角 + 视图中心/捕捉基点/捕捉间距/网格间距 2RD×4 +
 // 圆缩放 BS + 冻结层数/状态 BL + 样式表 TV + 渲染模式 RC + UCS 段
-// （对照 decodeViewportVer 的 R2000 分支；R2004+ shadeplot 与 R2007+
+// （对照 DecodeViewportVer 的 R2000 分支；R2004+ shadeplot 与 R2007+
 // grid_major/灯光段不写）。冻结层句柄数恒 0（无句柄来源）。
 func encFwdViewport(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	vp := ent.(*entity.EntViewport)
@@ -1321,7 +1304,7 @@ func encFwdViewport(w *bitstream.EncWriter, ent any, ver container.DwgVersion) e
 }
 
 // encFwdVertex3d VERTEX_3D/VERTEX_MESH/VERTEX_PFACE：RC 标志 + 3BD 位置
-// （三顶点变体同布局，对照 decodeVertex3d/decodeVertexPface）。
+// （三顶点变体同布局，对照 decodeVertex3d/DecodeVertexPface）。
 func encFwdVertex3d(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	switch v := ent.(type) {
 	case *entity.EntVertex3d:
@@ -1335,7 +1318,7 @@ func encFwdVertex3d(w *bitstream.EncWriter, ent any, _ container.DwgVersion) err
 }
 
 // encFwdVertexPfaceFace VERTEX_PFACE_FACE：4×BS 顶点索引（1 基，0 表边
-// 结束；负值按 BSd 有符号语义回绕，对照 decodeVertexPfaceFace）。
+// 结束；负值按 BSd 有符号语义回绕，对照 DecodeVertexPfaceFace）。
 func encFwdVertexPfaceFace(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	f := ent.(*entity.EntVertexPfaceFace)
 	for i := 0; i < 4; i++ {
@@ -1353,9 +1336,8 @@ func encFwdPolyline3d(w *bitstream.EncWriter, ent any, _ container.DwgVersion) e
 	return nil
 }
 
-// encFwdPolyline3dHandles POLYLINE_3D handle 流附加：R13~R2000 语义的
-// 首/末顶点句柄 + SEQEND 占位（JSON 来源缺省空引用，顶点经 owner 归属
-// 聚合还原；读侧保存 seqend 供 gold 对照，值不参与渲染）。
+// encFwdPolyline3dHandles 写入三维多段线的顶点和结束标记引用。
+// R13–R2000 写入首末顶点句柄，随后写入 SEQEND 占位引用。
 func encFwdPolyline3dHandles(w *bitstream.EncWriter, ent any, ver container.DwgVersion) error {
 	p := ent.(*entity.EntPolyline3d)
 	if ver == container.VerR13 || ver == container.VerR14 || ver == container.VerR2000 {
@@ -1390,7 +1372,7 @@ func encFwdPolylinePface(w *bitstream.EncWriter, ent any, _ container.DwgVersion
 }
 
 // encFwdPolylineMesh POLYLINE_MESH：6×BS 网格参数（R2000 无 owned 计数，
-// 对照 decodePolylineMesh 的 R2000 分支）。
+// 对照 DecodePolylineMesh 的 R2000 分支）。
 func encFwdPolylineMesh(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	m := ent.(*entity.EntPolylineMesh)
 	w.WriteBS(m.Flags)
@@ -1519,7 +1501,7 @@ func encFwdDimensionHandles(w *bitstream.EncWriter, ent any, _ container.DwgVers
 	return nil
 }
 
-// ---- 极限批次 E：动态类实体（类段注册 + ≥500 动态类型码） ----
+// 动态实体类编码与类表注册。
 
 // encFwdImage IMAGE/WIPEOUT（AcDbRasterImage 同布局）：类版本 + 图像三轴
 // 3BD + 尺寸 2RD + 显示属性 + 裁剪位与亮度组 + 裁剪边界（类型 1 固定两角，
@@ -1581,7 +1563,7 @@ func encFwdImageHandles(w *bitstream.EncWriter, ent any, _ container.DwgVersion)
 // R2007+ 字符串流不写；颜色 CMC 为 R2004 前的 BS 索引形态）。
 func encFwdMLeader(w *bitstream.EncWriter, ent any, _ container.DwgVersion) error {
 	m := ent.(*entity.EntMLeader)
-	// 上下文：空引线 + 全缺省标量（读侧 decodeMLeaderLeaders/Context 逐字段消费）
+	// 上下文：空引线 + 全缺省标量（读侧 DecodeMLeaderLeaders/Context 逐字段消费）
 	w.WriteBL(0)                 // num_leaders
 	w.WriteBD(0)                 // ctx.scale
 	write3BD(w, entity.Point3{}) // content_base
@@ -1683,7 +1665,7 @@ func encFwdLight(w *bitstream.EncWriter, ent any, ver container.DwgVersion) erro
 	return nil
 }
 
-// ---- 对象侧正向编码（最小集） ----
+// 对象侧正向编码（最小集）。
 
 // encodeForwardLayerBody LAYER 表记录（对照 parseLayerHeaderPreR2004 的
 // R2000 dat 流 + LibreDWG COMMON_TABLE_FLAGS 的 handle 流）：RL bitsize +
@@ -1838,7 +1820,7 @@ func encodeForwardBlockHeaderBody(bh forwardBlockHeader, blockEnt, endblkEnt uin
 	return w.Bytes(), nil
 }
 
-// encodeForwardDictionaryBody DICTIONARY 对象（对照 decodeDictionaryObject
+// encodeForwardDictionaryBody DICTIONARY 对象（对照 DecodeDictionaryObject
 // 的 R2000 dat 流）：reactors 原值保留但句柄以空引用占位（解码侧不保留
 // reactor 句柄列表，结构化重建以数量守恒为准）。
 func encodeForwardDictionaryBody(d *object.ObjDictionary, ver container.DwgVersion) ([]byte, error) {
@@ -1882,7 +1864,7 @@ func encodeForwardDictionaryBody(d *object.ObjDictionary, ver container.DwgVersi
 	return w.Bytes(), nil
 }
 
-// ---- 文件级组装 ----
+// 文件级组装。
 
 // writeDwgForwardR2000 将无回放素材的 drawing.Document 组装为 R2000 容器 DWG
 // 字节流。对象图按句柄升序铺放（差分编码要求单调），布局为：头部 0x15
@@ -2047,10 +2029,9 @@ func allocateForwardDynamicClasses(doc *drawing.Document) ([]string, map[string]
 	return order, codes
 }
 
-// collectForwardObjects 从 drawing.Document 收集全部可写对象：实体（模型空间 +
-// 块定义 + 属性）经正向实体编码器，LAYER 表记录与 DICTIONARY 经对象侧
-// 编码器。无正向编码器或无句柄的实体跳过（能力边界，见报告）。
-// dyn 为动态类名 → 类型码映射（无动态类实体时可为 nil）。
+// collectForwardObjects 收集文档中可由结构化写入器编码的实体和对象。
+// 覆盖模型空间、块定义和属性；缺少句柄或编码器的记录跳过。
+// dyn 提供动态类名与已分配类型码的映射。
 func collectForwardObjects(doc *drawing.Document, dyn map[string]uint16) ([]fwdObject, error) {
 	out := make([]fwdObject, 0, len(doc.ByHandle)+len(doc.LayerColors)+8)
 	seen := map[uint64]bool{}
@@ -2118,7 +2099,7 @@ func collectForwardObjects(doc *drawing.Document, dyn map[string]uint16) ([]fwdO
 		}
 		add(h, body)
 	}
-	// DICTIONARY（结构化正向；JSON 来源的 objGeneric 形式字典不在范围）
+	// DICTIONARY（结构化正向；JSON 来源的 ObjGeneric 形式字典不在范围）
 	for h, d := range doc.Dictionaries {
 		if d == nil || seen[h] {
 			continue
@@ -2153,7 +2134,7 @@ const (
 // appendForwardSkeleton 构建写出必需的骨架对象（LibreDWG dwgread 输出
 // DXF 的 BLOCK_CONTROL/*MODEL_SPACE 链）：表控制对象 ×9、*MODEL_SPACE 与
 // *PAPER_SPACE 块头、各块定义块头。句柄与文档实体冲突时从最大句柄之上
-// 顺序分配（模板句柄引用降级为悬空，dwgread 走 find_first_type 兜底）。
+// 顺序分配（模板句柄引用降级为悬空，dwgread 走 find_first_type 回退）。
 func appendForwardSkeleton(doc *drawing.Document, out *[]fwdObject, seen map[uint64]bool) {
 	allocate := func(preferred uint64) uint64 {
 		if !seen[preferred] {
@@ -2171,7 +2152,7 @@ func appendForwardSkeleton(doc *drawing.Document, out *[]fwdObject, seen map[uin
 		}
 		return h
 	}
-	// 块定义块头（含块内首末实体句柄）；块名优先取 JSON 侧 internalObjects
+	// 块定义块头（含块内首末实体句柄）；块名优先取 JSON 侧 InternalObjs
 	// 的 name 字段，缺失时以句柄合成
 	type blkDef struct {
 		handle      uint64
@@ -2211,7 +2192,7 @@ func appendForwardSkeleton(doc *drawing.Document, out *[]fwdObject, seen map[uin
 		blocks = append(blocks, bd)
 	}
 	// *MODEL_SPACE：模型空间直属实体（含最大块启发式并入由读侧处理，
-	// 此处仅挂 modelSpace 列表）
+	// 此处仅挂 ModelSpace 列表）
 	ms := blkDef{handle: allocate(fwdHdlModelSpace), name: "*Model_Space"}
 	for _, ent := range doc.ModelSpace {
 		if b := entity.EntityBase(ent); b != nil && b.Handle != 0 {
@@ -2280,7 +2261,7 @@ func appendForwardSkeleton(doc *drawing.Document, out *[]fwdObject, seen map[uin
 }
 
 // buildForwardObjectRecord 组装对象记录：MS size（< 0x7FFF 为 2 字节，
-// 否则 4 字节续组，与 readMS/r2000RecordEnd 的 15 位组语义对称）+ body +
+// 否则 4 字节续组，与 ReadMS/r2000RecordEnd 的 15 位组语义对称）+ body +
 // 尾部 CRC16（覆盖 MS 与 body，seed 0xC0C1）。
 func buildForwardObjectRecord(o fwdObject) ([]byte, error) {
 	size := len(o.body)
@@ -2309,11 +2290,8 @@ func buildForwardObjectRecord(o fwdObject) ([]byte, error) {
 	return out, nil
 }
 
-// buildForwardClassesSection 空类表段：前哨兵 + RL size + BS 类数(0) +
-// RC 占位 + CRC + 后哨兵。正向写出的主力实体全部使用固定类型码（<500），
-// 无动态类需求。
-// forwardClassInfo 类段注册条目：分配的动态类码与 DXF/CPP 类名
-// （isEntity 决定条目的 itemClassID：0x1F2 实体类 / 0x1F3 对象类）。
+// forwardClassInfo 保存类段条目的动态类型码及 DXF/CPP 名称。
+// isEntity 决定 itemClassID 使用实体类 0x1F2 还是对象类 0x1F3。
 type forwardClassInfo struct {
 	classNumber uint16
 	dxfName     string
@@ -2324,7 +2302,7 @@ type forwardClassInfo struct {
 // buildForwardClassesSection 构建 Classes 段：entries 为空时写空类表
 // （固定码实体无需动态类），非空时逐条目写 BS 类码 + BS 代理标志 +
 // 3×TV（app/cpp/dxf）+ B zombie + BS 实体类 id（对照
-// parseClassesSectionR13R15 的 R2000 条目布局，app 名用 ObjectDBX 惯例）。
+// ParseClassesSectionR13R15 的 R2000 条目布局，app 名用 ObjectDBX 惯例）。
 func buildForwardClassesSection(entries []forwardClassInfo) []byte {
 	w := bitstream.NewEncWriter()
 	w.WriteTF(container.SentinelClassesBefore[:])

@@ -1,12 +1,10 @@
-// encode_file.go 实现 DWG 文件级写出（dwg.write 第一/二代）：R2000（AC1015）
-// 家族采用「回放式」写出——段数据整段原样、对象记录整记录原样（解析时保留
-// 的原始字节），仅段目录与对象图按新布局重建。容器是三代中最简单的：段数据
-// 不压缩，段目录为 0x15 处的 record_no+offset+size 表 + 尾部 CRC + 哨兵。
-// R2004（AC1018~AC1032，加密头+页表+LZ77 压缩段）同样采用回放式：各段解压
-// 数据、段表（Section Info）与页表条目顺序整段原样保留，仅按 compressLZ77
-// 重新分页压缩并重建页表/加密头校验和。R2007（AC1021，RS 去交织+R21 解压
-// 的第三代容器）见本文件尾部：captureR2007Raw 采集素材，WriteDwgR2007 按
-// compressR21 重压缩分页、RS 交织重建页表/段表/第二头部。
+// Package writer 提供 DWG 文件、实体和对象的编码与导出。
+//
+// 回放式写出支持 R2000、R2004 系列及 R2007 容器。导出使用
+// 解析时保留的段和对象数据，并按目标布局重建目录、页表及相关校验值。
+// R2004 系列使用 LZ77 压缩，R2007 使用 R21 压缩和页面交织。
+//
+// 没有原始容器数据时，可由结构化 R2000 写入路径处理已支持的类型。
 package writer
 
 import (
@@ -40,8 +38,7 @@ func WriteDwgR2000(doc *drawing.Document, w io.Writer) error {
 	return err
 }
 
-// writeR2000Sections 按新布局组装 R2000 文件字节流。段写出按容器版本分派：
-// R2000 家族走回放式；R2004/R2007 容器由后续版本的段写出器在此分派扩展。
+// writeR2000Sections 根据保留的原始段和对象记录组装 R2000 系列文件。
 func writeR2000Sections(raw *container.R2000RawData) ([]byte, error) {
 	if len(raw.Order) == 0 {
 		return nil, fmt.Errorf("cad: 源文件缺少 R2000 段目录")
@@ -173,7 +170,7 @@ func buildR2000ObjectMap(refs []objrec.ObjectRef, baseDelta int64) []byte {
 }
 
 // putUMC 追加无符号模块化字符（对象图 handle 增量专用）：每字节 7 位低位在前，
-// 最高位为续传标志，最多 5 字节（与 readUnsignedModularChar 对称）。
+// 最高位为续传标志，最多 5 字节（与 ReadUnsignedModularChar 对称）。
 func putUMC(b []byte, v uint64) []byte {
 	for i := 0; i < 5; i++ {
 		cur := byte(v & 0x7F)
@@ -189,7 +186,7 @@ func putUMC(b []byte, v uint64) []byte {
 
 // putMC 追加有符号模块化字符（对象图 offset 增量）：终止字节最高位为 0、
 // 0x40 位为符号（负数写绝对值后置符号位），故终止字节至多承载 6 个数值位，
-// 剩余值含 0x40 位时需补一个续传字节；最多 4 字节（与 readModularChar、
+// 剩余值含 0x40 位时需补一个续传字节；最多 4 字节（与 ReadModularChar、
 // LibreDWG bit_write_MC 对称）。
 func putMC(b []byte, v int64) []byte {
 	neg := v < 0
@@ -295,18 +292,9 @@ type r2004PlacedPage struct {
 	payload []byte
 }
 
-// r2004CompressBlock 将页内容块压缩为 R2004 LZ77 流。与 compressLZ77 同源
-// （复用 lzGreedyMatches/lzWriteLitLen/lzWriteExtLen），但只用与读侧
-// lz77.go 及 LibreDWG decompress_R2004_section 语义完全一致的 opcode 子集：
-//   - 字面量：0x01-0x0F 短长度 / 0x00 扩展链；
-//   - 近距匹配 0x40-0xFF（距离 ≤0x400，长 3..14）；
-//   - 中距匹配 0x21-0x3F（距离 ≤0x400，长 3..33）与 0x20 长度扩展；
-//   - 0x11 终止符。
-//
-// 不发出 0x10/0x12-0x1F 远距 opcode：两套解压器对其基准位移/长度链的解释
-// 不一致（早期对齐基准 0x3FFF，LibreDWG 规格 0x4000/0x8000 且 0x18 走扩展
-// 长度链），真实文件亦从不使用；把匹配窗口限制在 0x400 内即可完全回避，
-// 代价仅为远距重复退化为字面量（约几个百分点的压缩率）。
+// r2004CompressBlock 将页面内容编码为受限操作码集合的 LZ77 流。
+// 使用字面量、近距离和中距离匹配，以及 0x11 终止符；匹配窗口限制
+// 在 0x400 内，不生成远距离匹配指令。该取舍减少编码分支，但可能降低压缩率。
 func r2004CompressBlock(src []byte) []byte {
 	n := len(src)
 	if n == 0 {
@@ -392,12 +380,8 @@ func writeR2004Sections(raw *container.R2004RawData) ([]byte, error) {
 	// ② 段表页与页表页载荷（段表内容原样回放，仅重新压缩）
 	infoPayload := container.CompressLZ77(raw.InfoBlob)
 	infoSize := uint32(container.R2004SystemHdrSize + len(infoPayload))
-	// 页表自身条目尺寸与内容相互依赖（条目写在内容里）。页表页采用
-	// store（不压缩）写出（对齐 LibreDWG write 端 SECTION_SYSTEM_MAP 的
-	// store 策略）：store 下页尺寸是内容长度的确定性函数，与自身条目的
-	// 数值无关，迭代一次即收敛。此前对页表内容做 LZ77 重压缩，压缩大小
-	// 随自身条目数值抖动，Leader/material/skylight 语料出现 173↔175 的
-	// 2-循环振荡，固定点不存在导致写出失败。
+	// 页表内容包含自身页面尺寸，因此压缩长度也参与目录计算。
+	// 后续使用全字面量编码，使输出长度只由输入长度决定。
 	buildMap := func(ownSize uint32) []byte {
 		buf := make([]byte, 0, len(raw.PageOrder)*8)
 		for _, id := range raw.PageOrder {
@@ -417,10 +401,7 @@ func writeR2004Sections(raw *container.R2004RawData) ([]byte, error) {
 		}
 		return buf
 	}
-	// 页表内容压缩为全字面量 LZ77 流（compressLZ77LiteralOnly）：压缩后
-	// 尺寸是内容长度的确定性函数，与自身条目数值无关，自引用尺寸一次
-	// 收敛。此前 store 写出（compression_type=1）不被 LibreDWG 读侧识别
-	// （其系统段解压无视该字段），启用匹配的压缩则因数值抖动振荡。
+	// 使用 CompressLZ77LiteralOnly 编码页表，并迭代到自身页面尺寸稳定。
 	sysSize := uint32(container.R2004SystemHdrSize)
 	var mapPayload []byte
 	for iter := 0; ; iter++ {
@@ -554,7 +535,7 @@ func r2004PageAddress(placed []r2004PlacedPage, id uint32) uint64 {
 }
 
 // r2004WriteSystemSection 写一个系统段页（页表/段表）：20 字节段头 +
-// 载荷。校验和按读侧口径计算：先对头部 20 字节累积（校验和字段本身按 0
+// 载荷。校验和按读侧规则计算：先对头部 20 字节累积（校验和字段本身按 0
 // 跳过），再以其为种子累积载荷。stored=true 时压缩类型写 1（载荷原样
 // 存储），否则写 2（LZ77 压缩，载荷须为压缩后的字节）。decompSize 为
 // 解压后内容字节数。
@@ -608,20 +589,11 @@ func r2004WriteDataPage(out []byte, p r2004PlacedPage, sec *container.R2004Secti
 	copy(out[off+container.R2004PageHdrSize:], p.payload)
 }
 
-// ---- R2007 (AC1021) 容器：RS 交织 + R21 压缩页 + 第二头部 ----
-//
-// 写出与 container_r2007.go 读侧逐点对称（以读侧校验点为准）：
-//   - 0x80 起 0x3D8 字节第二头部：RS(239,块=3,method4) 交织区内前 32 字节为
-//     (crc64,key64,dataCRC64,comprLen i32,len2)，comprLen<0 表示后续体未压缩
-//     （写侧统一取 -0x110），体为 34×u64 的文件头字段（LibreDWG
-//     Dwg_R2007_Header 布局，见 r2007HeaderField 下标常量）；
-//   - 0x458~0x480 为 0x28 字节间隔区（读侧原样跳过，写侧源样回放）；
-//   - 0x480 起为页数据区：页表条目 (size u64,id u64) 序列累加定址，页表与
-//     段表是系统页（RS(239) 交织 + 重复 correction 份的块数冗余，内容不压缩）；
-//   - 数据页：R21 压缩（压缩流不更短时原样存储）+ RS(251) 交织，物理页尺寸
-//     为 align32(块数×255)。段表内每页 7×u64（offset/size/id/uncomp/comp/
-//     checksum/crc），size 即页物理尺寸，LibreDWG 以「页表 size == RS 编码
-//     形式大小」判定走 RS 路径，与写侧口径绑定。
+// R2007 容器写出使用 Reed–Solomon 交织、R21 压缩页和第二头部。
+// 第二头部位于 0x80，字段体经过 R21 压缩；0x458–0x480 的间隔区保留
+// 源字节。页数据区从 0x480 开始，页表和段表用于定位与装配。
+// 数据页在压缩无收益时保留原始载荷，再进行 RS(251) 交织并按 32 字节
+// 边界对齐。页表尺寸与段表中的物理页尺寸须保持一致。
 
 // r2007HeaderField 第二头部 34×u64 体中写侧需要回填的字段下标（其余保留源值）。
 const (
@@ -639,7 +611,7 @@ const (
 	r2007FieldSecMapCorr   = 27 // 段表系统页 correction（保留源值）
 )
 
-// r2007EncodeRS RS 交织（读侧 r2007Deinterleave method4 的逆）：把 pedata 按
+// r2007EncodeRS RS 交织（读侧 R2007Deinterleave method4 的逆）：把 pedata 按
 // k 字节一块转置铺列，src[blockCount*idx+bc] = pedata[bc*k+idx]，去交织即
 // 还原。输出长度恰为块数×k（物理页再补零到块数×255 并对齐）。
 func r2007EncodeRS(pedata []byte, k, blockCount int) []byte {
@@ -654,7 +626,7 @@ func r2007EncodeRS(pedata []byte, k, blockCount int) []byte {
 
 // r2007EncodeSystemPage 编码一个系统页（页表/段表）：内容不压缩
 // （size_comp=size_uncomp，读侧走 memcpy 分支），RS(239) 交织，块数按
-// correction 份冗余推导（与读侧 readR2007SystemPage 口径一致）。返回物理页
+// correction 份冗余推导（与读侧 readR2007SystemPage 规则一致）。返回物理页
 // 字节与压缩/解压尺寸。
 func r2007EncodeSystemPage(content []byte, correction uint64) (phys []byte, sizeComp, sizeUncomp uint64) {
 	sizeUncomp = uint64(len(content))
@@ -671,7 +643,7 @@ func r2007EncodeSystemPage(content []byte, correction uint64) (phys []byte, size
 }
 
 // r2007DataPagePhysSize 数据页物理尺寸：align32(块数×255)，块数按压缩尺寸
-// 推导（读侧 r2007DataPageBlocks 同口径）。空载荷按 1 块兜底，避免
+// 推导（读侧 R2007DataPageBlocks 采用相同规则）。空载荷按 1 块回退，避免
 // 页表出现 size=0 的非法条目。
 func r2007DataPagePhysSize(sizeComp uint64) uint64 {
 	blocks := container.R2007DataPageBlocks(sizeComp)
@@ -713,7 +685,7 @@ type r2007PlacedPage struct {
 // WriteDwgR2007 将 R2007（AC1021）文档写出为 DWG 字节流。文档必须来自
 // Parse（内部保留回放素材）。布局：头部 0x80 字节（回填段地址）→ RS 交织
 // 的第二头部（34 字段回填后未压缩存储）→ 0x28 间隔区 → 页数据区（页表页、
-// 段表页与各数据页，数据页按 compressR21 重压缩 + RS 交织）。对象记录字节
+// 段表页与各数据页，数据页按 CompressR21 重压缩 + RS 交织）。对象记录字节
 // 随 AcDb:AcDbObjects / AcDb:Handles 段回放，句柄偏移不变。
 func WriteDwgR2007(doc *drawing.Document, w io.Writer) error {
 	if doc == nil || doc.R2007Raw == nil {
@@ -795,7 +767,7 @@ func writeR2007Sections(raw *container.R2007RawData) ([]byte, error) {
 			}
 		}
 		if raw.TrailingEmpty {
-			// 源段表尾部的空条目原样补回（基线行为对齐，见 r2007RawData 注释）
+			// 源段表尾部的空条目原样补回（基线行为对齐，见 R2007RawData 注释）
 			for i := 0; i < 8; i++ {
 				buf = binary.LittleEndian.AppendUint64(buf, 0)
 			}

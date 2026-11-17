@@ -1,7 +1,9 @@
-// 本文件实现内部对象的位级重编码（dwgwrite 编码方向的起点）：
-// 以 R2000-R2007 家族为例，从解码结果 objGeneric 重写对象 body
-// （OT 类型码 + RL bitsize + 句柄链 + 公共尾），供 round-trip 往返
-// 测试（解码→编码→重解码逐字段一致）使用。
+// 本文件实现非图形对象的原始位流回放及结构化字段编码。
+//
+// 回放路径使用 ObjGeneric 中保存的数据区和句柄流，并按版本处理
+// 记录前导及位数回填。字典、扩展记录和其他已支持对象另有字段写入
+// 函数，供结构化 R2000 导出使用。
+
 package writer
 
 import (
@@ -59,7 +61,7 @@ func EncodeInternalObjectR2000(g *object.ObjGeneric, typeCode uint16) ([]byte, u
 	return w.Bytes(), datEnd, nil
 }
 
-// encodeXdataItems 将 xdataItem 列表编码为扩展数据字节区
+// encodeXdataItems 将 XdataItem 列表编码为扩展数据字节区
 // （与 decodeXdataItems 对称；r2007Plus 决定字符串的 UTF-16 形态）。
 func encodeXdataItems(w *bitstream.EncWriter, items []object.XdataItem, r2007Plus bool) error {
 	for _, it := range items {
@@ -214,7 +216,7 @@ func EncodeDictionaryR2000(d *object.ObjDictionary, ver container.DwgVersion, wi
 		fmt.Fprintf(os.Stderr, "[dS] hard @%d\n", w.TellBits())
 	}
 	// texts：TV 长度含 \0 与否因写入方而异，优先按解码时记录的原始
-	// 位串原样写回；无记录（合成场景）时按 writeTV（长度不含 \0）
+	// 位串原样写回；无记录（合成场景）时按 WriteTV（长度不含 \0）
 	if d.TextRawBits != "" {
 		w.WriteBitsString(d.TextRawBits)
 	} else {
@@ -257,10 +259,9 @@ func eedInt64Field(key string, v any) (int64, error) {
 	return n, nil
 }
 
-// ---- 极限批次 E：objGeneric.Fields → 位流的通用对象正向编码器 ----
-// 与读侧 gfRead/decoders 表镜像：按对象类型专属写出器（gfWriters）以
-// 显式原语（BS/BL/BD/TV/RC/B/Point）序列化 Fields 展平键值，使 JSON
-// 来源的 LAYOUT/GROUP/XRECORD 等内部对象可结构化正向写出。
+// 通用对象的结构化字段编码。
+// 各类型写入函数读取 ObjGeneric.Fields 中的展平字段，并使用对应位流
+// 原语序列化，供 JSON 等来源的对象导出使用。
 
 // gfNum 数值字段读取（JSON 来源 float64、解码来源 int64 双形态）。
 func gfNum(g *object.ObjGeneric, key string) int64 {
@@ -321,7 +322,7 @@ func gfPoint(g *object.ObjGeneric, key string, n int) []float64 {
 	return out
 }
 
-// gfHandleValues 句柄引用数组解析：gold 形态 [code, size, ref, abs]
+// gfHandleValues 句柄引用数组解析：参考 JSON 形态 [code, size, ref, abs]
 // （abs 为末位绝对句柄）；JSON 侧 []any、解码侧 []uint64 双形态。
 // 返回全部绝对句柄。
 func gfHandleValues(v any) []uint64 {
@@ -376,21 +377,21 @@ func gfWriteBD(w *bitstream.EncWriter, g *object.ObjGeneric, key string) { w.Wri
 // 字段缺失或类型不匹配时使用对应的零值。
 func gfWriteB(w *bitstream.EncWriter, g *object.ObjGeneric, key string) { w.WriteB(gfBool(g, key)) }
 
-// gfWritePoint2 BD 压缩点（gfRead Point2 的逆）。
+// gfWritePoint2 BD 压缩点（GfRead Point2 的逆）。
 func gfWritePoint2(w *bitstream.EncWriter, g *object.ObjGeneric, key string) {
 	p := gfPoint(g, key, 2)
 	w.WriteBD(p[0])
 	w.WriteBD(p[1])
 }
 
-// gfWritePoint2RD raw double 点（gfRead Point2RD 的逆）。
+// gfWritePoint2RD raw double 点（GfRead Point2RD 的逆）。
 func gfWritePoint2RD(w *bitstream.EncWriter, g *object.ObjGeneric, key string) {
 	p := gfPoint(g, key, 2)
 	w.WriteRD(p[0])
 	w.WriteRD(p[1])
 }
 
-// gfWritePoint3 3BD 点（gfRead Point3 的逆）。
+// gfWritePoint3 3BD 点（GfRead Point3 的逆）。
 func gfWritePoint3(w *bitstream.EncWriter, g *object.ObjGeneric, key string) {
 	p := gfPoint(g, key, 3)
 	write3BD(w, entity.Point3{X: p[0], Y: p[1], Z: p[2]})
@@ -410,7 +411,7 @@ func gfWriteCommonTableFlags(w *bitstream.EncWriter, g *object.ObjGeneric, ver c
 }
 
 // gfWriteXdataItemsFromFields 从 Fields 的 xdata 数组（JSON 形态
-// [[code, value], ...]）重建 xdataItem 列表：组码按 resbufValueType
+// [[code, value], ...]）重建 XdataItem 列表：组码按 ResbufValueType
 // 分派值类型（与 decodeXdataItems 的读侧分派一致）。
 func gfWriteXdataItemsFromFields(g *object.ObjGeneric) []object.XdataItem {
 	raw, ok := g.Field("xdata").([]any)
@@ -436,7 +437,7 @@ func gfWriteXdataItemsFromFields(g *object.ObjGeneric) []object.XdataItem {
 			f, _ := pair[1].(float64)
 			item.Float = f
 		case object.XdataBinary:
-			// gold JSON 的二进制 xdata 为十六进制串（dwgread 输出口径）
+			// 参考 JSON 的二进制 xdata 为十六进制串（dwgread 输出规则）
 			if s, ok := pair[1].(string); ok {
 				b := make([]byte, len(s)/2)
 				for j := 0; j < len(b); j++ {
@@ -445,7 +446,7 @@ func gfWriteXdataItemsFromFields(g *object.ObjGeneric) []object.XdataItem {
 				item.Bytes = b
 			}
 		case object.XdataHandle:
-			// 句柄 xdata：gold JSON 十六进制串或数值双形态
+			// 句柄 xdata：参考 JSON 十六进制串或数值双形态
 			switch hv := pair[1].(type) {
 			case string:
 				fmt.Sscanf(hv, "%X", &item.Int)
@@ -507,7 +508,7 @@ func gfWriteScale(w *bitstream.EncWriter, g *object.ObjGeneric, _ container.DwgV
 }
 
 // gfWriteGroup GROUP：T name + BS unnamed + BS selectable + BL num_groups
-// （gold JSON 无 num_groups 键，以 groups 数组长度为准；组员句柄在
+// （参考 JSON 无 num_groups 键，以 groups 数组长度为准；组员句柄在
 // handle 流，镜像 decodeGenericGROUP）。
 func gfWriteGroup(w *bitstream.EncWriter, g *object.ObjGeneric, _ container.DwgVersion) error {
 	gfWriteTV(w, g, "name")
@@ -550,7 +551,7 @@ func gfWriteStyle(w *bitstream.EncWriter, g *object.ObjGeneric, ver container.Dw
 	return nil
 }
 
-// gfWriteXrecordGeneric objGeneric 形态的 XRECORD（JSON 来源）：BL
+// gfWriteXrecordGeneric ObjGeneric 形态的 XRECORD（JSON 来源）：BL
 // num_reactors（公共段）之后为 BL xdata_size + xdata items（两遍法，
 // 同 encodeXrecordR2000 布局）+ BS cloning。objid 句柄在 handle 流占位。
 func gfWriteXrecordGeneric(w *bitstream.EncWriter, g *object.ObjGeneric, ver container.DwgVersion) error {
@@ -559,7 +560,7 @@ func gfWriteXrecordGeneric(w *bitstream.EncWriter, g *object.ObjGeneric, ver con
 	if err := encodeXdataItems(tmp, items, ver >= container.VerR2007); err != nil {
 		return err
 	}
-	// xdata_size 以重编码实际字节数为准（写读自洽，不回放 gold 声明值）
+	// xdata_size 以重编码实际字节数为准（写读自洽，不回放 参考 JSON 声明值）
 	w.WriteBL(uint32(len(tmp.Bytes())))
 	w.WriteTF(tmp.Bytes())
 	if ver != container.VerR13 && ver != container.VerR14 {
@@ -619,7 +620,7 @@ func gfWriteLayout(w *bitstream.EncWriter, g *object.ObjGeneric, ver container.D
 	return nil
 }
 
-// gfFixedObjectCode 通用对象固定类型码（objTypeCode 静态表的写出侧
+// gfFixedObjectCode 通用对象固定类型码（ObjTypeCode 静态表的写出侧
 // 子集；动态类对象经 forwardObjectDynamicClasses 注册 ≥500 码）。
 var gfFixedObjectCode = map[string]uint16{
 	"PLACEHOLDER": 0x50,
@@ -660,7 +661,7 @@ func gfHandleFirst(g *object.ObjGeneric, key string) uint64 {
 	return 0
 }
 
-// encodeForwardGenericObject 将 objGeneric（JSON 来源展平 Fields）正向
+// encodeForwardGenericObject 将 ObjGeneric（JSON 来源展平 Fields）正向
 // 编码为 R2000 对象 body：RL bitsize + H self + EED 终止 + BL num_reactors
 // + 类型专属字段（gfWriters）→ handle 流（owner + reactors + xdic +
 // 类型专属引用）。dyn 为动态类码表（对象类名 → ≥500 码）。
@@ -696,7 +697,7 @@ func encodeForwardGenericObject(g *object.ObjGeneric, ver container.DwgVersion, 
 		return nil, err
 	}
 	patchRL(w, rlOff, uint32(w.TellBits()))
-	// handle 流：owner（Fields 的 ownerhandle 兜底）→ reactors（空引用
+	// handle 流：owner（Fields 的 ownerhandle 回退）→ reactors（空引用
 	// 占位）→ xdic → 类型专属引用
 	owner := g.Owner
 	if owner == 0 {
@@ -716,7 +717,7 @@ func encodeForwardGenericObject(g *object.ObjGeneric, ver container.DwgVersion, 
 			writeHdlCode(w, 2, h)
 		}
 	case "XRECORD":
-		// objid handles：JSON 来源无独立句柄键，写克隆标志声明数（gold 常为 0）
+		// objid handles：JSON 来源无独立句柄键，写克隆标志声明数（参考 JSON 常为 0）
 	case "LAYOUT":
 		// 布局关联句柄（读侧顺序 block_header + active_viewport +
 		// base_ucs + named_ucs；后两者无来源写空引用）

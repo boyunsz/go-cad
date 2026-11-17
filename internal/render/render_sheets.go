@@ -1,30 +1,13 @@
-// render_sheets.go 实现模型空间图框切分逐张出图（DetectSheets + RenderSheet*）：
-// 中国设计院典型 DWG 把多张图画在模型空间平铺（每张一个图框块 + 标题栏，
-// 全图仅 Model 布局），本文件组合多重信号识别图框 INSERT——块局部尺寸粗筛
-// （比例窗口 + 最短边）、矩形外框线（GB 图框的本质特征，stroke 四边 + 顶点
-// 矩形两级判定）、同名网格排列（平铺多张图强信号，加长图幅必需）、框内
-// 内容密度块级通过率（图框装内容，装饰框/设备框排除）——提取标题栏
-// 图名（图号模式优先配对图名，回退最大字号文本），逐张把视口裁剪到
-// 图框包围盒渲染 PNG/SVG；渲染宽度
-// 缺省按框内文字自适应（主体文字像素高 ≥8px，下限 4096），保证图内文字
-// 标注清晰可读。
+// 本文件识别模型空间中的图框，并按图框范围逐张渲染。
 //
-// 主要模块划分：
-//   - Sheet / SheetResult：图框与批量渲染结果数据结构
-//   - DetectSheets + sheetDetector：图框识别（粗筛 → 框线/网格/内容信号
-//     → 精确世界包围盒 → 贪心重叠去重 → 标题栏图号/图名），无图框时
-//     兜底整图单张（稳健分位包围盒）；有图框时尾部追加残余内容兜底
-//     切分（分位裁剪 → 网格密度聚类 → 补充 Sheet，回收文字说明页等
-//     无标准图框的内容区）
-//   - sheetPipeline：展开与全局过滤一次完成、逐张复用的渲染素材（含
-//     sheetWidthFor 自适应宽度）
-//   - 渲染后清晰度自检 + 自动重渲：PNG 渲染完统计框内全部文本的像素
-//     高达标率（≥8px 占比），低于 60% 且宽度未到上限时加倍宽度重渲，
-//     画布像素超内存上限拒绝并保留当前最优；终局不达标向 stdout 打
-//     印告警行（CLI 可见）。SVG 矢量输出无像素概念，跳过自检
-//   - RenderSheetPNG / RenderSheetSVG / RenderAllSheets：逐张与批量渲染
-//     入口（批量清单首项固定为整图全览单张）
-//   - SanitizeSheetName：图名 → 文件名净化（CLI 输出命名用）
+// 图框识别综合块尺寸、矩形边界、网格排列和内容分布等信号，随后从
+// 标题栏提取图纸名称。未识别到图框时回退为整图；已识别图框之外的
+// 内容可按空间分布生成补充区域。识别结果属于启发式分幅。
+//
+// 渲染管线复用展开和过滤结果。未指定 PNG 宽度时，根据文字像素高度
+// 选择宽度，并在资源限制内尝试放大重渲；该检查不保证所有文字均可读。
+// SVG 使用矢量输出，不执行基于像素高度的重渲检查。
+
 package render
 
 import (
@@ -81,11 +64,10 @@ const (
 	// sheetViewportMargin 单张视口在图框包围盒基础上外扩的比例，
 	// 避免边框线中心贴画布边缘被裁半。
 	sheetViewportMargin = 0.02
-	// SheetDefaultWidth 单图幅渲染默认宽度：单图幅下字号像素高比整图
-	// 2048 宽大一个数量级，是文字清晰的关键。CLI -sheets 模式同口径。
+	// SheetDefaultWidth 是未指定尺寸时单张图纸的初始渲染宽度，单位为像素。
 	SheetDefaultWidth = 4096
 	// sheetDetectorBudget 图框检测的展开预算：块定义局部展开按定义缓存、
-	// 候选精确展开数量有限；与整图渲染预算同级（newTessellator 默认值），
+	// 候选精确展开数量有限；与整图渲染预算同级（NewTessellator 默认值），
 	// 防大样图大块展开中途截断污染候选包围盒。
 	sheetDetectorBudget = 2000000
 	// frameEdgeFrac/frameTolFrac 框线信号参数：每边至少一条长 ≥ 边长
@@ -110,8 +92,8 @@ const (
 	// SheetMaxAutoWidth 自适应宽度上限：防微缩标注把宽度推到内存失控
 	//（16384×~6500 RGBA 约 420MB/张，已覆盖 A0 图幅全部正文字清晰）。
 	SheetMaxAutoWidth = 16384
-	// sheetTextMinPx 文字清晰像素高下限：sheetWidthFor 自适应宽度与
-	// 渲染后清晰度自检共用的达标口径（主体文字/全部文字 ≥8px 可读）。
+	// sheetTextMinPx 是自适应宽度和渲染后检查使用的文字像素高度阈值。
+	// 该阈值用于估算可读性，不表示所有字体和查看条件下的阅读保证。
 	sheetTextMinPx = 8.0
 	// sheetPassRateMin 渲染后清晰度自检的达标率下限：视口内全部文本
 	// 像素高达标（≥sheetTextMinPx）占比低于该值时触发加倍宽度重渲。
@@ -122,10 +104,8 @@ const (
 	// sheetHardMaxWidth 清晰度自检重渲链的宽度硬上限：16384 仍不达标
 	// 时允许翻倍到 32768（微缩标注最后一档），再往上已无物理意义。
 	sheetHardMaxWidth = 32768
-	// sheetMaxPixels 单张画布像素上限（内存防爆）：RGBA 每像素 4 字节，
-	// 4 亿像素 ≈ 1.6GB；加倍后的宽×高超过该值即拒绝该档重渲，保留已
-	// 达成的最优结果并注明（32768 宽 × 竖版高 ≈ 7.6 亿像素会被拒，
-	// 只有加长图幅等扁长视口才装得下）。
+	// sheetMaxPixels 是单张画布的像素数上限，用于限制渲染内存占用。
+	// RGBA 每像素占 4 字节；候选宽高乘积超过上限时，不再使用该尺寸重渲染。
 	sheetMaxPixels = 4.0e8
 	// sheetResidualQuantile 残余点分位裁剪比例：X/Y 各保留 [q, 1-q]
 	// 分位窗口内的点，窗口外为离群带（错位解码/垃圾实体远端坐标）。
@@ -140,57 +120,37 @@ const (
 	// 包围盒与任一标准框相交面积超过自身面积该比例视为紧贴图框的
 	// 标注带（环绕框的轴号圈/尺寸链）而非独立内容区。
 	sheetResidualOverlapFrac = 0.3
-	// sheetResidualCoarseRes/cellMin 粗聚类网格参数：残余点包围盒均分
-	// 64×64 格；格计数 < cellMin 的零星格（框间散落标注，1~4 点/格）
-	// 视为空格——它们被闭运算桥接后会把相距很远的内容区串成一条
-	// （实测设计说明带经此类噪声格与 40 万单位下方内容连成一体）。
+	// sheetResidualCoarseRes 和 sheetResidualCoarseCell 控制粗网格分辨率及有效点数阈值。
+	// 低密度单元被忽略，以减少零散标注将相距较远的区域连接起来。
 	sheetResidualCoarseRes  = 64
 	sheetResidualCoarseCell = 5
-	// sheetResidualGapFrac 残余细分产物的粘连合并判据：两分量间距小于
-	// 两者较小边长的该比例视为同页粘连合并回一页，否则视为不同页保持
-	// 拆分。相对判据与图纸量纲无关（页面间距相对页面尺寸的比例在真实
-	// 图纸上稳定），替代原固定跨度阈值 sheetResidualMaxSpan——后者在
-	// 大比例（1:500 总图）与小比例（1:20 大样）混排图纸上张数不可移植。
+	// sheetResidualGapFrac 是补充区域合并时使用的相对间距阈值。
+	// 当两个区域的间距小于其较小边长的该比例时，将它们合并为一个区域。
 	sheetResidualGapFrac = 0.3
-	// sheetResidualFineCell 细分网格固定世界格宽：粘连大分量内部按
-	// 该格宽重聚类（格数上限 sheetResidualFineRes）。页面间空隙通常数万
-	// 世界单位（实测 ~3~6 万），格宽取其 1/3 量级保证空隙跨 3+ 格可靠
-	// 分离；均分口径（跨度/格数上限）在超大粘连体上格宽反超符号间距，
-	// 会把图例符号串成连片（实测失效）。
+	// sheetResidualFineCell 指定细分聚类的世界坐标网格宽度。
+	// 网格数量受 sheetResidualFineRes 限制；该参数用于控制区域分离粒度，
+	// 具体效果取决于图纸尺寸及内容分布。
 	sheetResidualFineCell = 10000.0
-	// sheetResidualFineCellMin 细分格计数下限：轴网轴号点沿轴线每隔数万
-	// 一个（圈+文字），固定格宽下每格仅 1~3 点却经跳格桥接连成贯穿全图
-	// 的链，是粘连大分量"拆不开"的主因；说明页正文/图例表格区格计数
-	// 数十以上不受影响。
+	// sheetResidualFineCellMin 是细网格参与聚类所需的最低点数。
+	// 过滤低密度单元可减少稀疏轴网或标注连接独立内容区域的情况。
 	sheetResidualFineCellMin = 5
 	// sheetResidualFineRes 细分网格每轴格数上限（内存/规模防护）。
 	sheetResidualFineRes = 512
-	// sheetResidualMinDensity 分量密度下限（点 / 1e10 世界面积单位）：
-	// 图框外围的轴号标注带呈"宽扁散布"（实测密度 5~92），文字说明页/
-	// 图例表格区密集（数百~数千），低于阈值视为标注带剔除。
+	// sheetResidualMinDensity 指定补充区域的最低点密度。
+	// 密度以每 1e10 世界坐标面积单位的点数计算，用于排除稀疏标注区域。
 	sheetResidualMinDensity = 100.0
-	// sheetResidualMinTextFrac 细分子分量直属文本点占比下限：文字页
-	//（设计说明/表格）点云几乎全为文字插入点，图例符号区以符号线条
-	// 点为主（实测占比 <10%）——细分产物中占比达标的独立成页，其余
-	// 合并为整块（符号区按列碎分没有渲染价值）。
+	// sheetResidualMinTextFrac 指定细分区域独立成页所需的直属文字点比例。
+	// 未达到该比例的符号区域合并处理，以减少过度分幅。
 	sheetResidualMinTextFrac = 0.3
 	// sheetResidualMaxSheets 补充区域产出上限：按分量点数取前 N，
 	// 防异常样本输出爆炸。
 	sheetResidualMaxSheets = 16
 )
 
-// DetectSheets 识别模型空间中按标准图幅摆放的图框块，返回图名与
-// 世界坐标包围盒。判据组合见 candidates；去重保留面积更大者（同一
-// 区域重复图框/图框套图框）。图名按三级策略取自图框右下角标题栏区
-// （约 1/4 宽 × 1/6 高）：图号模式优先（配对图名组合 "图号-图名"）、
-// 区内最大字号文本回退（见 sheetTitle），再无则用块名，最末按序号
-// "图 N"。一个图框都识别不出时兜底返回整图单张（Name "整图"，
-// 包围盒取稳健分位口径 quantileSheetBounds，离群实体不撑爆视口）。
-//
-// 识别出标准图框时尾部追加残余内容兜底切分（residualSheets）：文字
-// 说明页（设计说明/图例表）无标准比例图框、判据天然漏识别，对框外
-// 残余内容网格密度聚类产出补充 Sheet，名字与标准框可区分（最大字号
-// 文本或"补充区域 N"）。
+// DetectSheets 根据模型空间块尺寸、边界和内容分布识别图框。
+// 返回名称及世界坐标包围盒，名称依次尝试标题栏、块名和自动编号。
+// 找不到图框时返回“整图”范围；识别到图框后，可追加未覆盖内容的
+// 补充区域。结果为启发式识别，doc 为 nil 时返回 nil。
 func DetectSheets(doc *drawing.Document) []Sheet {
 	if doc == nil {
 		return nil
@@ -243,7 +203,7 @@ type sheetDetector struct {
 	dotText     map[[2]float64]struct{}                   // dots 中文本插入点集合（文字页/符号区判别）
 }
 
-// newSheetDetector 构造检测器：buildVertexIndex 一次供全部块展开共用
+// newSheetDetector 构造检测器：BuildVertexIndex 一次供全部块展开共用
 // （POLYLINE 顶点聚合），预算放宽防大块展开中途截断；直属文本清单
 // 供标题栏图名提取。
 func newSheetDetector(doc *drawing.Document) *sheetDetector {
@@ -403,9 +363,8 @@ func (sd *sheetDetector) candidates() []sheetCand {
 		if !ratioOKA && !gridAligned(g.boxes) {
 			continue
 		}
-		// 内容密度（块级通过率）：图框每一张都容纳图内容；设备外形框
-		// 只有个别实例碰巧落在标注密集区（如 28 个实例仅 2 个框内有点），
-		// 通过率低于 sheetContentPassRate 的整块排除
+		// 根据同一块各实例的内容密度通过率筛选图框候选。
+		// 低于 sheetContentPassRate 的块整体排除，以减少设备外形框误识别。
 		boxes := make([]drawing.Box2, len(g.list))
 		counts := make([]int, len(g.list))
 		pass := 0
@@ -459,7 +418,7 @@ func cornerBox(b drawing.Box2, t drawing.Xform) drawing.Box2 {
 //     × frameEdgeFrac，位于边容差带内），覆盖 LINE/闭合 LWPOLYLINE/
 //     POLYLINE 展开段；
 //  2. 顶点级：单个 LWPOLYLINE 顶点构成轴对齐矩形——覆盖未显式闭合的
-//     4 顶点矩形外框（tessLwPolyline 对开放折线只展开 n-1 段，闭合边
+//     4 顶点矩形外框（TessLwPolyline 对开放折线只展开 n-1 段，闭合边
 //     缺失，stroke 级会漏判）。
 //
 // GB 图框必有矩形外框，设备/符号块无此特征，是图框与内容块的本质区分。
@@ -789,11 +748,9 @@ func pickSheetNo(texts []sheetTextLike, b drawing.Box2) *sheetTextLike {
 	return best
 }
 
-// sheetNameNear 取图号附近的图名：同行（dy ≥ -1.5×字高）或上方一个标题栏
-// 行距内（dy ≤ 25×字高，标题栏图名栏排在图号栏正上方，实测 18~20×字高），
-// 右端与图号右端对齐（|Δ| ≤ 6×字高；标题栏栏内右对齐排版，左侧图例表/
-// 线缆表文本右端相距数十倍字高，借此排除），内容为中文为主长文本
-// （sheetCjkName）。多个候选字号大者优先，同级距图号近者优先。
+// sheetNameNear 从图号附近选择候选图名。
+// 候选须满足相对字高定义的行距和右端对齐范围，并通过 sheetCjkName
+// 检查；优先选择字号较大的文本，同字号时选择距离较近者。
 func sheetNameNear(no *sheetTextLike, texts []sheetTextLike) string {
 	rightNo := no.X + estTextWidth(no.text, no.hWorld)
 	var best *sheetTextLike
@@ -856,7 +813,7 @@ func estTextWidth(text string, h float64) float64 {
 	return w
 }
 
-// blockName 块定义句柄 → BLOCK_HEADER 真名（internalObjects 登记值），
+// blockName 块定义句柄 → BLOCK_HEADER 真名（InternalObjs 登记值），
 // 匿名块名（"*Model_Space" 等 * 前缀）返回空串避免误作图名。
 func (sd *sheetDetector) blockName(h uint64) string {
 	g := sd.doc.InternalObjs[h]
@@ -870,9 +827,8 @@ func (sd *sheetDetector) blockName(h uint64) string {
 	return s
 }
 
-// fallbackWhole 兜底整图单张：无任何图框候选（纯模型空间无图框）时
-// 返回整图视口，包围盒用稳健分位口径（quantileSheetBounds），保证
-// 离群实体不把视口撑爆、主体内容铺满画布。
+// fallbackWhole 为没有可用图框候选的文档生成单张“整图”结果。
+// 范围由 quantileSheetBounds 估计，可能排除远离主要内容的坐标簇。
 func (sd *sheetDetector) fallbackWhole() []Sheet {
 	prim := drawing.NewTessellator(sd.doc)
 	prims := prim.ExpandAll()
@@ -904,20 +860,10 @@ type residualGridParams struct {
 	minDots int // 分量点数下限
 }
 
-// residualSheets 残余内容兜底切分：文字页（设计说明/图例表）常为模型
-// 空间直属图元、根本不是块 INSERT，图框判据天然漏识别——对标准框覆盖
-// 不到的直属实体代表点先分位裁剪剔除离群带（使用 quantileSheetBounds 的分位裁剪策略），再两级网格密度聚类：粗网格（sheetResidualCoarseRes 均分、
-// 零星格下限）聚合大内容区；粘连分量（多页经窄空隙连成一体，渲染后
-// 主体文字被稀释不可读）按固定格宽 sheetResidualFineCell 细网格重聚类，
-// 子分量是否合并回同页由间距分布自适应判定（mergeCloseComps 的相对
-// 判据，无固定跨度阈值）。两级均带跳格桥接（页内小空隙连通、页间距离
-// 保持分离）。细分产物按直属文本占比分流：文字页独立成块，符号图块区
-// （占比低，细分只会长出符号列碎片）合并为整块。达标的分量再经密度
-// 下限（剔除图框外围轴号标注带）与标准框重叠剔除后产出补充 Sheet 追加
-// 到标准框之后：Name 取分量内最大字号可读直属文本（如"弱电设计说明
-// （一）"），无可读文本用"补充区域 N"（N 为产出顺序号）；Box 为分量点
-// 包围盒每边外扩 sheetResidualMarginFrac。参数保守（点数/密度阈值 +
-// 重叠剔除 + 产出上限），宁可漏识别不可把整图切成碎片。
+// residualSheets 将已识别图框之外的内容尝试划分为补充区域。
+// 先对代表点作分位裁剪，再进行粗网格和细网格聚类；根据区域间距、
+// 文字比例、点数和密度决定保留或合并。与标准图框重叠的区域会被过滤。
+// 区域以候选标题或“补充区域 N”命名，输出数量受上限约束。
 func (sd *sheetDetector) residualSheets(covered []drawing.Box2) []Sheet {
 	residual := make([][2]float64, 0, len(sd.dots))
 	for _, d := range sd.dots {
@@ -939,11 +885,8 @@ func (sd *sheetDetector) residualSheets(covered []drawing.Box2) []Sheet {
 		gapJump: true,
 		minDots: sheetResidualMinDots,
 	})
-	// 粘连拆页自适应（无固定跨度阈值）：每个粗聚类分量统一细网格重
-	// 聚类，拆分与否完全由子分量间距分布决定——间距 < 较小边长×
-	// sheetResidualGapFrac 的子块视为同页粘连合并回一页，更大间距视为
-	// 不同页保持拆分（mergeCloseComps）。拆不开（页面共享边框连成不可
-	// 分整块）或本就单一页面的分量保留整块兜底
+	// 对粗聚类分量进行细网格重聚类，再根据间距合并相邻子区域。
+	// 无法进一步分离的内容保留为一个区域。
 	finals := make([]residualComp, 0, len(comps))
 	for _, c := range comps {
 		subs := gridDensityComponents(c.pts, residualGridParams{
@@ -1015,8 +958,7 @@ func (sd *sheetDetector) residualSheets(covered []drawing.Box2) []Sheet {
 			my = mx
 		}
 		box := [4]float64{comp.box.MinX - mx, comp.box.MinY - my, comp.box.MaxX + mx, comp.box.MaxY + my}
-		// 命名用外扩后的框：页面标题基线可能高于点云上缘（页顶框线
-		// 端点少、聚类后不在分量内，实测说明页标题高于点云 2000+ 单位）
+		// 命名时使用外扩后的范围，以包含可能位于点云边缘之外的标题基线。
 		name := sd.residualTitle(drawing.Box2{MinX: box[0], MinY: box[1], MaxX: box[2], MaxY: box[3]})
 		if name == "" {
 			name = fmt.Sprintf("补充区域 %d", n)
@@ -1096,10 +1038,8 @@ func mergeCloseComps(comps []residualComp, gapFrac float64) []residualComp {
 	return out
 }
 
-// clipDotsQuantile 残余点分位裁剪：X/Y 各保留 [sheetResidualQuantile,
-// 1-sheetResidualQuantile] 分位窗口内的点，窗口外离群点剔除（同
-// quantileSheetBounds 的分位口径；residual 为调用方私有切片，原地
-// 过滤无外部副作用）。
+// clipDotsQuantile 按 X/Y 分位窗口原地过滤 residual 中的离群点。
+// 返回值复用输入切片的底层数组；调用方不得假定原元素顺序或内容保持不变。
 func clipDotsQuantile(dots [][2]float64) [][2]float64 {
 	n := len(dots)
 	if n < 4 {
@@ -1126,14 +1066,9 @@ func clipDotsQuantile(dots [][2]float64) [][2]float64 {
 	return out
 }
 
-// gridDensityComponents 残余点网格密度聚类：点云包围盒按 p.res×p.res
-// 均分格计数，格计数 < p.cellMin 的零星格剔除（防散落标注噪声被桥接
-// 串成跨距巨大的连片），可选闭运算桥接（非空格 8 邻域膨胀一次）后取
-// 8-连通分量——文字行距/图元间距略大于格距时点会周期性跳格（相邻点
-// 隔 1 空格），不桥接会把一行文字切成多个小分量（实测 60 点被切成
-// 5×12 点全部低于阈值漏识别）；桥接后相隔 ≥2 空格（≥3×格距）的区域
-// 仍保持分离。返回点数达 p.minDots 的分量（点数降序，大片区域排前，
-// 结果顺序确定）。
+// gridDensityComponents 按网格统计点密度并提取八邻域连通分量。
+// 低于 cellMin 的网格不参与聚类；可选的邻域扩张用于连接小范围空隙。
+// 仅保留点数达到 minDots 的分量，并按点数降序返回。
 func gridDensityComponents(dots [][2]float64, p residualGridParams) []residualComp {
 	if p.res <= 0 || p.minDots <= 0 || len(dots) == 0 {
 		return nil
@@ -1147,8 +1082,7 @@ func gridDensityComponents(dots [][2]float64, p residualGridParams) []residualCo
 	if bb.Invalid() {
 		return nil
 	}
-	// 格宽：固定世界格宽（细分拆页口径，空隙分离不随粘连体跨度变粗）
-	// 或包围盒均分（粗聚类口径）；两轴格数各自钳制到 res 上限
+	// 按固定世界格宽或包围盒均分确定网格，两个轴的格数均受 res 限制。
 	spanX, spanY := bb.MaxX-bb.MinX, bb.MaxY-bb.MinY
 	cw, ch := spanX/float64(p.res), spanY/float64(p.res)
 	nx, ny := p.res, p.res
@@ -1212,7 +1146,7 @@ func gridDensityComponents(dots [][2]float64, p residualGridParams) []residualCo
 			continue
 		}
 		id := len(comps)
-		// 包围盒初始化为 ±Inf：零值 box2{0,0,0,0} 会让全正象限分量的
+		// 包围盒初始化为 ±Inf：零值 Box2{0,0,0,0} 会让全正象限分量的
 		// minX/minY 停留在原点，bbox 被撑到 (0,0) 造成虚假大跨度
 		comps = append(comps, residualComp{box: drawing.Box2{MinX: math.Inf(1), MinY: math.Inf(1), MaxX: math.Inf(-1), MaxY: math.Inf(-1)}})
 		cells := []int{start}
@@ -1289,11 +1223,8 @@ func (sd *sheetDetector) textFrac(c residualComp) float64 {
 	return float64(n) / float64(c.dots)
 }
 
-// residualTitle 补充区域命名：区域内世界字高最大的可读直属文本
-// （标题类大字）；最大字号同级（±10%）的候选取距页面 x 中线最近者——
-// 页面标题水平居中，轴号/页码等同字号文本贴左右缘或角落（实测说明页
-// 标题"弱电设计说明（一）"会被轴号"1"/页码"2"抢占）。无可读文本
-// 返回空串由调用方回退"补充区域 N"。
+// residualTitle 选择补充区域内字号较大的可读直属文本作为标题。
+// 字号相近时优先选择靠近区域水平中心的文本；没有候选时返回空字符串。
 func (sd *sheetDetector) residualTitle(b drawing.Box2) string {
 	bestH := 0.0
 	for _, t := range sd.modelTexts {
@@ -1326,13 +1257,10 @@ func sheetReadableText(s string) bool {
 	return false
 }
 
-// quantileSheetBounds 稳健分位包围盒（兜底整图视口用）：收集图元坐标，
-// X/Y 各取 p0.5 与 p99.5 分位作为粗框——垃圾/隐形构造实体是长尾离群
-// 点，分位裁剪后视口贴主体内容；相比 robustBounds 的「中位数 ± 3×p90
-// 偏差」，双峰分布（主体图元 + 远处标注簇）不再把视口撑大数倍。粗框
-// 之上再做主分量收紧（principalRange）：脱离主体的孤立小簇在整图视口
-// 下只占数个像素、却把画布拉宽数倍稀释主体内容，裁出视口。样本过少
-// 或分位窗口零宽（≥99% 坐标重合）时回退旧口径。
+// quantileSheetBounds 通过坐标分位数和主要坐标簇估计图纸范围。
+// 先取两个轴的 0.5%–99.5% 分位区间，再由 principalRange 收紧。
+// 点数不足时使用图元包围盒，分位区间退化时使用 RobustBounds。
+// 该范围用于预览，可能裁去远离主要内容的有效图元。
 func quantileSheetBounds(prims []drawing.Primitive) drawing.Box2 {
 	var n int
 	for _, p := range prims {
@@ -1387,13 +1315,10 @@ func quantileSheetBounds(prims []drawing.Primitive) drawing.Box2 {
 	return b
 }
 
-// principalRange 主内容分量范围：在已排序坐标的 [lo,hi] 分位粗框内做
-// 等分直方图，取坐标点数最大的连通带簇收紧窗口。连通判定用相对跨度
-// 空隙（连续空带 > quantGapBreakFrac×带数视为断开）：离散网格坐标的
-// 小空隙、图块间正常留白保持连通；孤立簇与主体之间隔着大比例空白
-// （如室外总图主平面与远处标高标注簇之间 85% 跨度的空带）才分离。
-// 兜底整图视口用：保留孤立簇会把画布拉宽数倍、主体内容被稀释成中部
-// 一条（非白占比骤降），收紧后视口铺满主内容。
+// principalRange 在已排序坐标的分位区间内估计主要内容范围。
+// 坐标先归入等分直方图；连续空带超过 quantGapBreakFrac 指定的相对
+// 阈值时分开区域，再选择点数最多的连通区域收紧范围。
+// 该预览策略可能排除远处的有效图元，不用于判定源文件内容是否完整。
 func principalRange(sorted []float64, lo, hi float64) (float64, float64) {
 	const (
 		bands = 64
@@ -1450,10 +1375,10 @@ func principalRange(sorted []float64, lo, hi float64) (float64, float64) {
 	return bestLo, bestHi
 }
 
-// ---- 逐张渲染 ----
+// 逐张渲染。
 
 // sheetViewport 图框包围盒 → 渲染视口：外扩 sheetViewportMargin 边距，
-// 零尺寸退化兜底（与 RenderPNG 的边距口径一致）。
+// 零尺寸退化回退（与 RenderPNG 的边距规则一致）。
 func sheetViewport(b [4]float64) drawing.Box2 {
 	bb := drawing.Box2{MinX: b[0], MinY: b[1], MaxX: b[2], MaxY: b[3]}
 	marginX := (bb.MaxX - bb.MinX) * sheetViewportMargin
@@ -1476,9 +1401,9 @@ type sheetPipeline struct {
 	modelTexts []sheetTextLike // 直属文本（自适应宽度统计用）
 }
 
-// prepareSheets 构建共享渲染管线：展开/放射线过滤/原点锚定剔除与
-// RenderPNG 完全一致（渲染管线全部复用，金标路径不受影响）；基准框
-// 同 RenderPNG 用分位口径（quantileSheetBounds），双峰分布不撑大剔除窗口。
+// prepareSheets 准备可供多张图纸复用的预览图元和文本。
+// 展开、异常线段过滤及范围估计与预览 PNG 路径使用相同策略，避免逐张
+// 重复展开整份文档。
 func prepareSheets(doc *drawing.Document) *sheetPipeline {
 	prim := drawing.NewTessellator(doc)
 	prims := prim.ExpandAll()
@@ -1560,7 +1485,7 @@ func (sp *sheetPipeline) sheetWidthFor(vp drawing.Box2, sheet Sheet, width int) 
 }
 
 // renderPNG 渲染单张图框为 PNG：视口裁剪到图框包围盒（外扩边距），
-// 框外图元按包围盒相交预剔除（跨框长线由画布裁剪兜底）。渲染后执行
+// 框外图元按包围盒相交预剔除（跨框长线由画布裁剪回退）。渲染后执行
 // 清晰度自检：统计框内全部文本 label 的像素高达标率，低于
 // sheetPassRateMin 且宽度未到上限时加倍宽度重渲（自动出图即清晰的
 // 核心，用户无需人工调参选宽度）；画布像素超内存上限的档位拒绝，
@@ -1701,7 +1626,7 @@ func (sp *sheetPipeline) renderSVG(sheet Sheet, opts RenderOptions) ([]byte, int
 }
 
 // primInBox 图元与视口粗相交判定（框外图元剔除）：stroke 图元任一段
-// 与视口 AABB 相交即保留（整段绘制由画布参数化裁剪兜底）；label 图元
+// 与视口 AABB 相交即保留（整段绘制由画布参数化裁剪回退）；label 图元
 // 按基线起点或终点落在视口内判定。
 func primInBox(p *drawing.Primitive, b drawing.Box2) bool {
 	switch p.Kind {
@@ -1770,9 +1695,9 @@ func RenderSheetSVG(doc *drawing.Document, sheet Sheet, opts RenderOptions) ([]b
 }
 
 // RenderAllSheets 图框切分批量渲染：DetectSheets 识别全部图框（无图框
-// 兜底整图单张），整图展开一次逐张复用。输出清单首项固定为"整图全览"
+// 回退整图单张），整图展开一次逐张复用。输出清单首项固定为"整图全览"
 // 单张（整图稳健分位视口 quantileSheetBounds）——用户除逐张图框外总要
-// 一张"整的"；无图框兜底单张（Name "整图"）本身即全览，不重复添加。
+// 一张"整的"；无图框回退单张（Name "整图"）本身即全览，不重复添加。
 // format 取 "png" 或 "svg"（大小写不敏感），其余报错。
 func RenderAllSheets(doc *drawing.Document, opts RenderOptions, format string) ([]SheetResult, error) {
 	if doc == nil {

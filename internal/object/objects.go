@@ -1,7 +1,7 @@
-// objects.go 实现 DWG 对象层：对象索引构建（buildObjectIndex）与 R2010+
-// 重复句柄候选消解（selectBestDuplicateHandles）。记录模型/对象图解码/
-// 记录头定位/类型码命名等最底层记录原语已上提 internal/objrec（打破
-// entity↔object 循环依赖），本文件保留依赖实体扫描的对象层逻辑。
+// Package object 提供 DWG 非图形对象的解码和对象索引处理。
+//
+// 对象索引处理为重复句柄选择可解析的候选记录。对象记录的
+// 基础定位与位流视图由 objrec 包提供，供实体和对象解码共同使用。
 package object
 
 import (
@@ -20,7 +20,7 @@ func BuildObjectIndex(fileData []byte) ([]objrec.ObjectRef, error) {
 	return objrec.ParseObjectMapHandles(handlesData)
 }
 
-// ---- R2010+ 重复句柄候选消解（对齐参考实现 permissive 路径） ----
+// R2010+ 重复句柄候选消解（对齐参考实现 permissive 路径）。
 
 // dedupeSelect 信息：单个候选记录的解析摘要。
 type dedupeSelect struct {

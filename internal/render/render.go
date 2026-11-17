@@ -1,7 +1,8 @@
-// render.go 实现纯 Go 的模型空间光栅化渲染：
-// INSERT 递归展开（仿射变换）→ 包围盒自适应视口 → 图元离散为线段 → 厚线段绘制。
-// 文本经 textLabel 估算占位几何并携带 textInfo 版式，由 render_text.go 以
-// 系统字体真实字形绘制（旋转/镜像/对齐/换行），无可用字体时回退基线占位条。
+// Package render 提供图纸的 PNG 和 SVG 渲染及图框分幅功能。
+//
+// 预览模式直接处理图元、视口、颜色和文字；faithful 模式通过
+// PreparedDrawing 统一几何与文字布局，再分别输出 PNG 或 SVG。
+// 模型空间图框识别提供分幅信息，供逐张渲染和文本归属使用。
 package render
 
 import (
@@ -48,7 +49,7 @@ func RenderPNG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 		}
 		return p.PNG()
 	}
-	// nil 文档防御：与其他导出 API 的错误返回口径一致，不 panic
+	// 空文档按导出接口约定返回错误。
 	if doc == nil {
 		return nil, fmt.Errorf("cad: 文档为空，无法渲染")
 	}
@@ -64,9 +65,7 @@ func RenderPNG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	prims := prim.ExpandAll()
 	prims = filterRadiatingStrokes(prims)
 
-	// 2. 稳健包围盒：分位窗口 + 主分量收紧（quantileSheetBounds，与
-	// DetectSheets 兜底口径一致）——「中位数±3×p90」在主体图元+远处
-	// 标注簇的双峰分布下会把视口撑大数倍，主体内容被稀释成中部一条
+	// 使用分位范围和主要坐标簇估计视口，减少远处孤立坐标对预览范围的影响。
 	bbox := quantileSheetBounds(prims)
 	if bbox.Invalid() {
 		bbox = drawing.Box2{MinX: 0, MinY: 0, MaxX: 1, MaxY: 1}
@@ -78,7 +77,7 @@ func RenderPNG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	marginX := (bbox.MaxX - bbox.MinX) * 0.05
 	marginY := (bbox.MaxY - bbox.MinY) * 0.05
 	if marginX == 0 && marginY == 0 {
-		marginX, marginY = 1, 1 // 退化（单点/空图）兜底
+		marginX, marginY = 1, 1 // 退化（单点/空图）回退
 	} else if marginX == 0 {
 		marginX = marginY
 	} else if marginY == 0 {
@@ -112,7 +111,7 @@ func RenderPNG(doc *drawing.Document, opts RenderOptions) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// ---- 图元展开（tessellation） ----
+// 图元展开（tessellation）。
 
 // canvas 像素画布与世界→像素变换。
 type canvas struct {
@@ -167,13 +166,9 @@ func entityColor(doc *drawing.Document, e *drawing.Primitive, bgWhite bool) colo
 	return color.RGBA{255, 255, 255, 255}
 }
 
-// LayerRenderColor 图层记录的渲染取色（与实体色 32 位保留口径配套）：
-// 图层 CMC 的 32 位 rgb 值低 24 位 ≤0xFF 时为 ACI 索引形（方法字节
-// 0xC3=ByLayer/0xC1=ByACI 变体，R2010+ 图层记录的常态——LibreDWG gold
-// 中该形占 260/261，如 0xC3000007 即 ACI 7），低 24 位 >0xFF 时才是 RGB
-// 真彩形（0xC2/0xC0，如 0xC2FFFFFF 白）。索引形不做真彩取色，否则
-// ACI 1~8 的彩色图层（红/黄/绿/青/品红等）被画成 RGB(0,0,n) 深蓝近黑，
-// 消防线型图例表等 ByLayer 彩色内容整体失色。无有效色返回 false。
+// LayerRenderColor 根据图层颜色记录解析 RGB 值。
+// 当前实现将已标记颜色中低 24 位不超过 0xFF 的值按 ACI 索引处理，
+// 其余按 RGB 处理；没有有效颜色时返回 false。
 func LayerRenderColor(lc drawing.LayerColor, bgWhite bool) (color.RGBA, bool) {
 	if lc.HasTrue {
 		if low := lc.TrueColor & 0x00FFFFFF; low <= 0xFF {
@@ -226,7 +221,7 @@ func (c *canvas) drawLine(s drawing.Stroke, col color.RGBA) {
 func (c *canvas) drawPixelLine(x1, y1, x2, y2 float64, col color.RGBA) {
 	brush := c.lineWidth // 笔刷半径（像素，随渲染宽度自适应）
 	if brush <= 0 {
-		brush = 0.75 // 兜底（测试直接构造 canvas 未设线宽时保持历史口径）
+		brush = 0.75 // 未设置线宽时使用默认笔刷宽度。
 	}
 	w := float64(c.img.Bounds().Dx())
 	h := float64(c.img.Bounds().Dy())

@@ -1,5 +1,9 @@
-// entities_more.go 实现补充实体族：射线/构造线、实心/轨迹、三维面、
-// 引线、多线、二维/三维多段线及其顶点。
+// 本文件实现补充几何与注释实体的解码。
+//
+// 实体包括射线、构造线、填充面、多段线及顶点、引线、多线、视口、
+// 公差、形状和 ACIS 数据等。各解析函数读取类型专用字段，并与公共
+// 实体头及句柄解析流程配合。
+
 package entity
 
 import (
@@ -12,7 +16,7 @@ import (
 	"os"
 )
 
-// ---- RAY / XLINE ----
+// RAY / XLINE。
 
 // EntRay 射线（起点 + 单位方向）。XLINE 与之同构。
 type EntRay struct {
@@ -41,7 +45,7 @@ func decodeRay(r *bitstream.BitStream, Head *CommonEntityHead, Xline bool) (any,
 	}, nil
 }
 
-// ---- SOLID / TRACE ----
+// SOLID / TRACE。
 
 // EntSolid 实心填充（四角点）。TRACE 与之同构。
 type EntSolid struct {
@@ -96,7 +100,7 @@ func decodeSolid(r *bitstream.BitStream, Head *CommonEntityHead, Trace bool) (an
 	return s, nil
 }
 
-// ---- 3DFACE ----
+// 3DFACE。
 
 // EntFace3d 三维面（四点 + 不可见边标志）。
 type EntFace3d struct {
@@ -209,7 +213,7 @@ func read3DD(r *bitstream.BitStream, def Point3) (Point3, error) {
 	return Point3{X, Y, Z}, nil
 }
 
-// ---- LEADER ----
+// LEADER。
 
 // EntLeader 引线（dwg.spec LEADER）：注释/路径类型 + 折点数组 +
 // 尾部标志与 R14 专属尺寸字段。
@@ -220,7 +224,7 @@ type EntLeader struct {
 	PathType                       uint16
 	Points                         []Point3
 	UnknownBit1                    bool    // 头部未知位
-	Origin                         Point3  // 原点（R2000+ gold 键）
+	Origin                         Point3  // 原点（R2000+ 参考字段）
 	Extrusion                      Point3  // 挤出方向
 	XDirection                     Point3  // X 方向
 	InsptOffset                    Point3  // 插入点偏移
@@ -241,8 +245,9 @@ type EntLeader struct {
 	UnknownBit5                    bool    // 尾部未知位（R14 与 R2000b+）
 }
 
-// CalcHooklineOn 复刻 dwg_calc_hookline_on：annot_type 低 2 位非 0 或
-// path_type 末位非 0 或末两点几乎水平（|角度|≤π/12）时钩线关闭。
+// CalcHooklineOn 根据注释类型、路径类型和末段方向更新钩线开关。
+// 注释类型低两位或路径类型最低位非零时关闭钩线；末段方向接近水平
+// （距 0 或 π 不超过 π/12）时也关闭钩线。
 func (l *EntLeader) CalcHooklineOn() {
 	const hooklineOffset = 3.141592653589793 / 12
 	Angle := 3.141592653589793 / 2
@@ -390,11 +395,11 @@ func decodeLeader(r *bitstream.BitStream, Head *CommonEntityHead, ver container.
 	return l, nil
 }
 
-// ---- MLINE ----
+// MLINE。
 
 // EntMLineVertex 多线顶点。segParams/areaParams 为全部样式线的扁平参数
 // 数组（DXF 组码语义同构）；segCounts/areaCounts 记录每条样式线的参数数
-// （DWG/JSON 来源可按线分组还原 gold lines[j].segparms，DXF 无分组信息）。
+// （DWG/JSON 来源可按线分组还原 参考 JSON lines[j].segparms，DXF 无分组信息）。
 type EntMLineVertex struct {
 	Position, Direction, Miter Point3
 	SegParams                  []float64
@@ -410,8 +415,8 @@ type EntMLine struct {
 	Justification uint8
 	OpenClosed    uint16
 	LinesInStyle  uint8
-	// basePoint/extrusion 主体 3BD（渲染平铺与法向，decodeMline 读取后
-	// 保留；gold JSON 同名键导出对照）
+	// BasePoint/extrusion 主体 3BD（渲染平铺与法向，decodeMline 读取后
+	// 保留；参考 JSON 同名键导出对照）
 	BasePoint   Point3
 	Extrusion   Point3
 	Vertices    []EntMLineVertex
@@ -500,8 +505,7 @@ func decodeMline(r *bitstream.BitStream, Head *CommonEntityHead) (any, error) {
 	}
 	Owner, Layer := decodeOwnerLayer(r, Head)
 	m.Owner, m.Layer = Owner, Layer
-	// handle 流：公共序（reactors/xdic/layer/ltype/prev/next）之后为
-	// MLINESTYLE 句柄（批次 B 修正：原直读首个句柄会命中公共序前置项）
+	// MLINESTYLE 引用位于公共句柄序列之后，须先消费公共引用。
 	r.SetBitPos(Head.ObjSizeBit)
 	if owner2, layer2, e := ParseCommonEntityHandles(r, Head); e == nil {
 		m.Owner, m.Layer = owner2, layer2
@@ -512,7 +516,7 @@ func decodeMline(r *bitstream.BitStream, Head *CommonEntityHead) (any, error) {
 	return m, nil
 }
 
-// ---- POLYLINE_2D / POLYLINE_3D + VERTEX ----
+// POLYLINE_2D / POLYLINE_3D + VERTEX。
 
 // EntVertex2d POLYLINE_2D 顶点。
 type EntVertex2d struct {
@@ -551,7 +555,7 @@ func decodeVertex2d(r *bitstream.BitStream, Head *CommonEntityHead, R2010Plus bo
 		return nil, err
 	}
 	if R2010Plus {
-		// FIELD_BL0(id, 91)：R2010+ 顶点标识符（uhengshenhua 实证 714 顶点）
+		// FIELD_BL0(id, 91)：R2010 及之后版本的顶点标识符。
 		var vid uint32
 		if vid, err = r.ReadBL(); err != nil {
 			return nil, err
@@ -588,7 +592,7 @@ func decodeVertex3d(r *bitstream.BitStream, Head *CommonEntityHead) (any, error)
 	return v, nil
 }
 
-// EntVertexPface 面网格顶点（VERTEX_PFACE/VERTEX_MESH 共用布局，gold 键
+// EntVertexPface 面网格顶点（VERTEX_PFACE/VERTEX_MESH 共用布局，参考字段
 // point/flag；POLYLINE_PFACE 的顶点由 owner 归属聚合）。
 type EntVertexPface struct {
 	BaseEntity
@@ -612,7 +616,7 @@ func DecodeVertexPface(r *bitstream.BitStream, Head *CommonEntityHead) (any, err
 	return v, nil
 }
 
-// EntVertexPfaceFace 面网格面记录（VERTEX_PFACE_FACE，gold 键 vertind）：
+// EntVertexPfaceFace 面网格面记录（VERTEX_PFACE_FACE，参考字段 vertind）：
 // POLYLINE_PFACE 的面顶点索引（1 基，0 表示边结束）。
 type EntVertexPfaceFace struct {
 	BaseEntity
@@ -636,25 +640,23 @@ func DecodeVertexPfaceFace(r *bitstream.BitStream, Head *CommonEntityHead) (any,
 	return f, nil
 }
 
-// EntUnknownEnt UNKNOWN_ENT 兜底实体：未建模动态类实体（如 ACAD_TABLE，
-// LibreDWG 默认构建同样兜底为 UNKNOWN_ENT）的通用容器。位流布局按
+// EntUnknownEnt UNKNOWN_ENT 回退实体：未建模动态类实体（如 ACAD_TABLE，
+// LibreDWG 默认构建同样回退为 UNKNOWN_ENT）的通用容器。位流布局按
 // dwg2.spec UNKNOWN_ENT = HANDLE_UNKNOWN_BITS：公共头之外的主体不解析，
 // 原始位串由 fillMeta/collectEntityRawBits 自动收集，roundtrip 回放保留。
 type EntUnknownEnt struct {
 	BaseEntity
 }
 
-// UnknownEntFallbackNames UNKNOWN_ENT 兜底类名名单：仅收录 LibreDWG 默认
-// 构建无专门解码器、实体输出 UNKNOWN_ENT 的动态类（example_r14 等九样本
-// dwgread 重跑实证 type=528 ACAD_TABLE → UNKNOWN_ENT）。LIGHT/MULTILEADER
-// 等有正式 spec 布局的类不在名单，兜底会掩盖真实类型导致对齐失真。
+// UnknownEntFallbackNames 列出允许按 UNKNOWN_ENT 保留原始载荷的动态类。
+// 未列出的类必须使用专用解码器或报告不支持，避免静默隐藏解析缺失。
 var UnknownEntFallbackNames = map[string]bool{
 	"ACAD_TABLE": true,
 }
 
-// decodeUnknownEnt UNKNOWN_ENT 兜底解码：不读主体字段，仅解析 handle 流
+// decodeUnknownEnt UNKNOWN_ENT 回退解码：不读主体字段，仅解析 handle 流
 // 的 owner/layer；原始类名（如 ACAD_TABLE）存 extra.dxfname，对齐
-// LibreDWG「实体键输出 UNKNOWN_ENT、DXF 名保留原类」的兜底语义。
+// LibreDWG「实体键输出 UNKNOWN_ENT、DXF 名保留原类」的回退语义。
 func decodeUnknownEnt(r *bitstream.BitStream, Head *CommonEntityHead, dxfname string) (any, error) {
 	e := &EntUnknownEnt{BaseEntity: BaseEntity{
 		Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode,
@@ -664,9 +666,8 @@ func decodeUnknownEnt(r *bitstream.BitStream, Head *CommonEntityHead, dxfname st
 	return e, nil
 }
 
-// EntHelix 螺旋线实体（AcDbHelix：SPLINE 布局前缀 + 螺旋专有字段，
-// dwg2.spec DWG_ENTITY (HELIX)，scenario/degree/num_knots 等经
-// 2000/Helix.dwg dwgread -v9 trace 现场核对）。
+// EntHelix 保存螺旋线的样条基础参数和螺旋专用字段。
+// 格式参考：LibreDWG dwg2.spec 中的 HELIX 定义。
 type EntHelix struct {
 	BaseEntity
 	Scenario    uint32 // 1=控制点样条 2=拟合点样条
@@ -872,12 +873,12 @@ type EntPolyline2d struct {
 	Thickness  float64
 	Elevation  float64
 	Extrusion  Point3
-	// firstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄（顶点全量
-	// 由 owner 归属聚合，见 assemblePolylineChildren）
+	// FirstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄（顶点全量
+	// 由 owner 归属聚合，见 AssemblePolylineChildren）
 	FirstVertex  uint64
 	LastVertex   uint64
 	OwnedHandles []uint64
-	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，gold seqend 键导出）
+	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，参考 JSON seqend 键导出）
 }
 
 // decodePolyline2d POLYLINE_2D：BS 标志 + BS 曲线类型 + 起末宽 + BT 厚 +
@@ -903,9 +904,8 @@ func decodePolyline2d(r *bitstream.BitStream, Head *CommonEntityHead, hasOwnedCo
 	if P.Elevation, err = r.ReadBD(); err != nil {
 		return nil, err
 	}
-	// extrusion 为 FIELD_BE（单位向量压缩，默认 (0,0,1) 仅 2 位）：
-	// 3BD 读法在默认值时多读 4 位使 num_owned 错位
-	// （uhengshenhua h=17453 num_owned=418 实证，LibreDWG spec 同为 BE）
+	// extrusion 使用 FIELD_BE 读取压缩挤出向量。
+	// 不可改用三个独立 BD 字段，否则默认向量会导致后续字段位置偏移。
 	if ex, ey, ez, eErr := r.ReadBE(); eErr != nil {
 		return nil, eErr
 	} else {
@@ -947,7 +947,7 @@ func decodePolyline2d(r *bitstream.BitStream, Head *CommonEntityHead, hasOwnedCo
 		}
 		P.OwnedHandles = append(P.OwnedHandles, h)
 	}
-	// SEQEND 结束句柄（顶点句柄之后恒在，gold seqend 键导出）
+	// SEQEND 结束句柄（顶点句柄之后恒在，参考 JSON seqend 键导出）
 	if h, e := objrec.ReadHandleReference(r, Head.Handle); e == nil {
 		P.Seqend = h
 	}
@@ -959,12 +959,12 @@ type EntPolyline3d struct {
 	BaseEntity
 	Flags75 uint8
 	Flags70 uint8
-	// firstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄（顶点全量
-	// 由 owner 归属聚合，见 assemblePolylineChildren）
+	// FirstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄（顶点全量
+	// 由 owner 归属聚合，见 AssemblePolylineChildren）
 	FirstVertex  uint64
 	LastVertex   uint64
 	OwnedHandles []uint64
-	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，gold seqend 键导出）
+	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，参考 JSON seqend 键导出）
 }
 
 // decodePolyline3d POLYLINE_3D：RC×2 标志 + [R2004+ BL 顶点数] + handle 流顶点句柄。
@@ -1011,7 +1011,7 @@ func decodePolyline3d(r *bitstream.BitStream, Head *CommonEntityHead, hasOwnedCo
 		}
 		P.OwnedHandles = append(P.OwnedHandles, h)
 	}
-	// SEQEND 结束句柄（顶点句柄之后恒在，gold seqend 键导出）
+	// SEQEND 结束句柄（顶点句柄之后恒在，参考 JSON seqend 键导出）
 	if h, e := objrec.ReadHandleReference(r, Head.Handle); e == nil {
 		P.Seqend = h
 	}
@@ -1091,17 +1091,17 @@ func DecodeToleranceVer(r *bitstream.BitStream, Head *CommonEntityHead, ver cont
 }
 
 // EntPolylinePface 多面网格（顶点/面数由子实体归属）。
-// entPolylinePface 三维多面网格（顶点由 owner 归属聚合）。
+// EntPolylinePface 三维多面网格（顶点由 owner 归属聚合）。
 type EntPolylinePface struct {
 	BaseEntity
 	NumVertices int
 	NumFaces    int
-	// firstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄；R2004+ 为
+	// FirstVertex/lastVertex R13~R2000 handle 流的首末顶点句柄；R2004+ 为
 	// num_owned 计数向量（ownedHandles），与 POLYLINE_2D 同构
 	FirstVertex  uint64
 	LastVertex   uint64
 	OwnedHandles []uint64
-	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，gold seqend 键导出）
+	Seqend       uint64 // SEQEND 结束句柄（顶点句柄后，参考 JSON seqend 键导出）
 }
 
 // decodePolylinePface POLYLINE_PFACE：BS 顶点数 + BS 面数 + [R2004+ BL
@@ -1151,14 +1151,14 @@ func decodePolylinePface(r *bitstream.BitStream, Head *CommonEntityHead, hasOwne
 		}
 		P.OwnedHandles = append(P.OwnedHandles, h)
 	}
-	// SEQEND 结束句柄（顶点句柄之后恒在，gold seqend 键导出）
+	// SEQEND 结束句柄（顶点句柄之后恒在，参考 JSON seqend 键导出）
 	if h, e := objrec.ReadHandleReference(r, Head.Handle); e == nil {
 		P.Seqend = h
 	}
 	return P, nil
 }
 
-// ---- VIEWPORT / SHAPE / POLYLINE_MESH ----
+// VIEWPORT / SHAPE / POLYLINE_MESH。
 
 // EntViewport 视口实体（dwg.spec VIEWPORT：center/width/height 全版本 +
 // R2000+ 视图/捕捉/UCS 参数 + R2007+ 灯光/环境色）。
@@ -1411,7 +1411,7 @@ type EntShape struct {
 	WidthFactor float64
 	Oblique     float64
 	Thickness   float64
-	StyleId     uint16 // STYLE 表索引（gold style_id 键）
+	StyleId     uint16 // STYLE 表索引（参考 JSON style_id 键）
 	ShapeNo     uint16 // SHAPEFILE 内形编号（pre-R13 的 1 字节表索引，R13+ 在位流 BS）
 	Extrusion   Point3
 }
@@ -1439,7 +1439,7 @@ func decodeShape(r *bitstream.BitStream, Head *CommonEntityHead) (any, error) {
 	if s.Thickness, err = r.ReadBD(); err != nil {
 		return nil, err
 	}
-	if s.StyleId, err = r.ReadBS(); err != nil { // STYLE 表索引（gold style_id）
+	if s.StyleId, err = r.ReadBS(); err != nil { // STYLE 表索引（参考 JSON style_id）
 		return nil, err
 	}
 	if s.Extrusion, err = read3pt(r); err != nil {
@@ -1512,7 +1512,7 @@ func DecodePolylineMesh(r *bitstream.BitStream, Head *CommonEntityHead, hasOwned
 	return m, nil
 }
 
-// ---- REGION / 3DSOLID / BODY / WIPEOUT（R2000+ 覆盖实体）----
+// REGION / 3DSOLID / BODY / WIPEOUT（R2000+ 覆盖实体）。
 
 // EntWipeout 区域覆盖实体（AcDbWipeout，位布局同 AcDbRasterImage）。
 type EntWipeout struct {
@@ -1623,7 +1623,7 @@ func DecodeWipeoutVer(r *bitstream.BitStream, Head *CommonEntityHead, ver contai
 	return w, nil
 }
 
-// ---- REGION / 3DSOLID / BODY（ACIS 类实体）----
+// REGION / 3DSOLID / BODY（ACIS 类实体）。
 
 // EntAcis ACIS 类实体（REGION/3DSOLID/BODY）：
 // 按 LibreDWG DECODE_3DSOLID 提取 SAT/SAB 文本块（几何内核不在解析范围），
@@ -1636,7 +1636,7 @@ type EntAcis struct {
 	AcisData    []byte // 解混淆后的 SAT 文本
 	SabSize     int
 	acisHandles []uint64
-	historyId   uint64 // history_id 句柄（R2004+ handle 流，gold history_id 键导出）
+	historyId   uint64 // history_id 句柄（R2004+ handle 流，参考 JSON history_id 键导出）
 	Kind        string
 	// COMMON_3DSOLID 尾部字段
 	Unknown              uint8 // acis 主体前的未知位
@@ -1647,7 +1647,7 @@ type EntAcis struct {
 	IsolinePresent       bool
 	NumWires             uint32
 	numSilhouettes       uint32
-	wires                []acisWire       // 线框明细（wires[i] 标量，gold 值级对照）
+	wires                []acisWire       // 线框明细（wires[i] 标量，参考 JSON 值级对照）
 	silhouettes          []acisSilhouette // 轮廓视图明细（silhouettes[i] 标量）
 	AcisEmptyBit         bool
 	numMaterials         uint32
@@ -1664,9 +1664,9 @@ type EntAcis struct {
 // points 与变换矩阵为数组键不参与值级对照，仅保存审计用标量。
 type acisWire struct {
 	Type             uint8 // RC 线框类型
-	SelectionMarker  int32 // BLd 有符号选择标记（gold 出现 -1）
+	SelectionMarker  int32 // BLd 有符号选择标记（参考 JSON 出现 -1）
 	Color            int64 // BS 读入（FIELD_CAST BS→BL）
-	AcisIndex        int32 // BLd 有符号 ACIS 索引（gold 出现 -1）
+	AcisIndex        int32 // BLd 有符号 ACIS 索引（参考 JSON 出现 -1）
 	TransformPresent bool  // 是否跟 5×3BD 变换 + 3 个标志位
 	HasRotation      bool  // 变换标志（transform_present=1 时有效）
 	HasReflection    bool  // 变换标志（transform_present=1 时有效）
@@ -1686,7 +1686,7 @@ type acisSilhouette struct {
 // 流（宿主键无值级对照），仅保存两个标量。
 type acisMaterial struct {
 	ArrayIndex uint32 // BL 材质在文档材质表中的索引
-	MatAbsref  uint32 // BL 材质绝对引用（gold 可为 0）
+	MatAbsref  uint32 // BL 材质绝对引用（参考 JSON 可为 0）
 }
 
 // AcisDeobfuscate ACIS 文本解混淆：≤32 的字节保留，其余取 159-字节。
@@ -1703,7 +1703,7 @@ func AcisDeobfuscate(raw []byte) []byte {
 }
 
 // decodeAcis ACIS 实体解码的兼容入口（版本由 head 推断：R13/R14 或
-// R2007+ 最新布局）。版本感知路径经 cad.go 特判走 decodeAcisVer。
+// R2007+ 最新布局）。版本感知路径经 cad.go 特判走 DecodeAcisVer。
 func decodeAcis(r *bitstream.BitStream, Head *CommonEntityHead, Kind string, srcVer container.DwgVersion) (any, error) {
 	ver := container.VerR2013
 	if Head.R13r14 {
@@ -1797,9 +1797,8 @@ func DecodeAcisVer(r *bitstream.BitStream, Head *CommonEntityHead, Kind string, 
 	}
 	// COMMON_3DSOLID：线框/参考点/轮廓线段
 	if err = DecodeAcisWireframe(r, a); err != nil {
-		// 线框/轮廓段损坏（LibreDWG 对此类记录同样错位报错）：
-		// 放弃尾部字段降级纳管，直接落到 handle 流保证对象可用
-		//（位流已错位，history_id 不可信不读取——R2013 样本实证）
+		// 线框或轮廓数据解析失败时，保留已读取字段并转到句柄流。
+		// 当前位置不再可信，因此不继续读取 history_id 等尾部数据。
 		Owner, Layer := decodeOwnerLayer(r, Head)
 		a.Owner, a.Layer = Owner, Layer
 		r.SetBitPos(Head.ObjSizeBit)
@@ -1819,12 +1818,9 @@ func DecodeAcisVer(r *bitstream.BitStream, Head *CommonEntityHead, Kind string, 
 			if a.numMaterials, err = r.ReadBL(); err != nil {
 				return nil, err
 			}
-			// 材质循环（array_index BL + mat_absref BL + material handle）。
-			// LibreDWG REPEAT_CHKCOUNT 口径：条数×sizeof(条目字节)与剩余
-			// 位**不对称比较**（24×n > AVAIL_BITS 即拒绝；skylight 实证
-			// h=2001 144×24=3456>43 位拒绝、h=3330 1×24=24≤85 位通过）。
-			// 拒绝时清零计数并放弃尾部字段、按 handle 流降级纳管——返回
-			// 错误会令扫描框架淘汰正确起点候选，反而解出错位对象
+			// 读取材质项：数组索引、材质引用及句柄。
+			// 当前计数检查使用每项 24 与剩余位数比较；未通过时清零计数并放弃
+			// 后续专用字段，保留已解析内容。该检查属于容错条件。
 			if a.numMaterials > 1_000_000 ||
 				int64(a.numMaterials)*24 > int64(r.TotalBits()-r.TellBits()) {
 				a.numMaterials = 0
@@ -1846,8 +1842,7 @@ func DecodeAcisVer(r *bitstream.BitStream, Head *CommonEntityHead, Kind string, 
 				if ma, err = r.ReadBL(); err != nil {
 					return nil, err
 				}
-				// material_handle 在 handle 流（COMMON_ENTITY_HANDLE_DATA
-				// 的 layer 之后，skylight h=3330 trace 实证），dat 流只读标量
+				// 材质句柄在句柄流中读取，主体流只读取材质项标量。
 				a.materials = append(a.materials, acisMaterial{ArrayIndex: ai, MatAbsref: ma})
 			}
 		}
@@ -1920,10 +1915,9 @@ func readAcisHandles(r *bitstream.BitStream, Head *CommonEntityHead) []uint64 {
 	return out
 }
 
-// DecodeAcisWireframe 解析 COMMON_3DSOLID 线框/参考点/轮廓线段：
-// wireframe_data_present → point_present(+point 3BD) → isolines BL →
-// isoline_present → wires/silhouettes 递归结构（WIRESTRUCT_fields）。
-// 线框明细不进入实体模型，仅按结构跳过保证位序正确。
+// DecodeAcisWireframe 读取 ACIS 的线框、参考点和轮廓结构。
+// 按标志读取参考点、等参线计数和线框/轮廓集合；具体保留的数据取决于
+// 各子结构的解析分支，不能替代 ACIS 几何求值。
 func DecodeAcisWireframe(r *bitstream.BitStream, a *EntAcis) error {
 	var err error
 	var v uint8
@@ -2079,14 +2073,11 @@ func DecodeAcisWireframe(r *bitstream.BitStream, a *EntAcis) error {
 	return nil
 }
 
-// ---- R2013+ 字符串区（string stream）读取 ----
+// R2013+ 字符串区（string stream）读取。
 
-// readStringAreaStrings 读取 R2007+ 对象的字符串区内容。
-// 布局（LibreDWG obj_string_stream）：[文字数据区 data_size 字节]
-// [has_strings B @bitsize-1][data_size RS @bitsize-17][handle 流]。
-// 字符串区内为顺序排列的 TU 串（正文、标签等），空串是合法元素
-// （chuandongzhou ATTRIB text_value="" 后紧跟 tag 实证），一并返回，
-// 读取失败即止。
+// readStringAreaStrings 从记录尾部字符串区读取最多 max 个 TU 字符串。
+// 根据尾部存在标志和长度字段定位字符串区，保留空字符串；定位无效时
+// 返回 nil，读取失败时返回此前已读内容。读取使用位流副本，不改变 r 的位置。
 func readStringAreaStrings(r *bitstream.BitStream, Head *CommonEntityHead, max int) []string {
 	if Head.ObjSizeBit < 34 {
 		return nil
@@ -2218,7 +2209,7 @@ func entitySolidSane(e *EntSolid) bool {
 
 // SeqendHandle INSERT 的 SEQEND 句柄占位：正向重建无独立记录来源，以
 // 块内末属性 +1 不成立时回退块头句柄；读侧将该句柄保存至 seqend 字段
-// （gold seqend 键对照用），值不参与渲染与文本提取，仅保持 handle 流
+// （参考 JSON seqend 键对照用），值不参与渲染与文本提取，仅保持 handle 流
 // 结构合法。
 func (e *EntInsert) SeqendHandle() uint64 {
 	if h := e.Attribs[len(e.Attribs)-1]; h != 0 {
@@ -2227,9 +2218,9 @@ func (e *EntInsert) SeqendHandle() uint64 {
 	return e.BlockHeader
 }
 
-// SeqendPlaceholder POLYLINE_2D/3D/PFACE 的 SEQEND 占位：正向重建无独立
-// 记录来源，优先回显首末顶点句柄（非零时保证引用可解析），否则写 NULL
-// 空引用；读侧保存至 seqend 字段（gold seqend 键对照用），值不参与渲染。
+// SeqendPlaceholder 为缺少独立 SEQEND 记录的多段线生成占位引用。
+// 优先使用已有首末顶点句柄，否则返回零；此引用供结构化写出使用，
+// 不表示真实的 SEQEND 记录已恢复。
 func (p *EntPolyline2d) SeqendPlaceholder() uint64 {
 	if p.FirstVertex != 0 {
 		return p.FirstVertex

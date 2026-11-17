@@ -1,12 +1,13 @@
-// typecode.go DWG 类型码命名与实体判定：固定类型码静态表（objTypeCode）、
-// 动态类名表查询（EntityTypeName）与实体类型码判定（IsEntityType）。
-// 纯表驱动逻辑，供实体/对象/文档编排多层共用（自 objects.go/cad.go 上提）。
+// 本文件提供 DWG 类型码名称查询、实体类型判定和句柄引用读取。
+//
+// 类型名称结合固定类型码表与动态类名表解析，供实体、对象和文档处理
+// 流程使用。
+
 package objrec
 
 import "github.com/boyunsz/go-cad/internal/bitstream"
 
-// objTypeCodeByName 常用类型码 → 名称静态表（<500 的固定段，按码值
-// 紧凑排列；0x1F3 PROXY_OBJECT 为高位特例）。
+// ObjTypeCode 保存已知固定类型码与实体或对象名称的映射。
 var ObjTypeCode = map[uint16]string{
 	0x01:  "TEXT",
 	0x02:  "ATTRIB",
@@ -141,7 +142,7 @@ func IsEntityType(code uint16, dynamic map[uint16]string) bool {
 			"ACDBPOLYLINE", "ACDBSPLINE", "ACDBHATCH", "ACDBDIMENSION",
 			"HATCH",                     // R13/R14 类段中 HATCH 以本名注册（type 536/539）
 			"REGION", "3DSOLID", "BODY", // 注入动态表的固定码实体（0x25/26/27）
-			// 实体类（gold 确认身份；专有几何暂未实现，走通用实体头）
+			// 实体类名称映射；是否支持专用几何解析由实体分派器决定。
 			"ACDBWIPEOUT", "WIPEOUT", "IMAGE", "ACDBRASTERIMAGE",
 			"LWPOLYLINE", // R14 类段以本名注册（type 535；R2000+ 为固定码 0x0F）
 			"MPOLYGON", "ACDBMPOLYGON",

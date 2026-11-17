@@ -1,10 +1,9 @@
-// compress.go 实现两个 DWG 写出方向压缩器，与解压端逐格式互逆：
-//   - compressLZ77：R2004+ 页面数据的 Autodesk LZ77 变体（逆向 lz77.go）；
-//   - compressR21：R2007 专用 R21 流（逆向 r21.go，含字面量块重排怪癖）。
+// 本文件实现 DWG 容器写入使用的 LZ77 和 R21 压缩器。
 //
-// 两者均采用「哈希链贪心匹配 + 全字面量兜底」策略，输出保证能被本包
-// decompressLZ77 / decompressR21 逐字节还原；不追求与 Autodesk 原生
-// 压缩器字节一致，正确性优先于压缩率。
+// LZ77 用于 R2004 系列页面，R21 用于 R2007 页面。匹配搜索采用哈希链和
+// 贪心策略，未匹配数据以字面量写出；输出由对应解压器还原。
+// 压缩结果不要求与原生 CAD 软件生成的字节序列一致。
+
 package container
 
 // lzMatch 一次贪心回溯匹配：在 pos 处声明「回溯 dist 复制 length 字节」。
@@ -75,12 +74,9 @@ func LzGreedyMatches(src []byte, minMatch, maxDist, maxLen int) []lzMatch {
 	return matches
 }
 
-// CompressLZ77LiteralOnly 输出全字面量 LZ77 流（零匹配）：输出长度是
-// 输入长度的确定性函数、与内容无关。专供 R2004 页表页使用——LibreDWG
-// 读侧对系统段无条件走 LZ77 解压（不识别 store/compression_type=1，
-// 0.14 实测 decode.c:1706 无条件调用），而页表内容含自身条目数值，
-// 启用匹配的压缩会因数值抖动产生自引用长度振荡（173↔175 二循环），
-// 全字面量流从根上消除振荡。
+// CompressLZ77LiteralOnly 将输入编码为不包含回溯引用的 LZ77 流。
+// 输出长度只取决于输入长度，适合包含自身页面尺寸的系统页：条目数值
+// 变化不会改变压缩长度，可避免页尺寸计算因压缩内容变化而反复调整。
 func CompressLZ77LiteralOnly(src []byte) []byte {
 	n := len(src)
 	if n == 0 {
@@ -96,9 +92,9 @@ func CompressLZ77LiteralOnly(src []byte) []byte {
 	return append(out, 0x11)
 }
 
-// ---- R2004 Autodesk LZ77 变体压缩 ----
+// R2004 Autodesk LZ77 变体压缩。
 
-// CompressLZ77 将 src 压缩为可被 decompressLZ77(src, len(src)) 还原的流。
+// CompressLZ77 将 src 压缩为可被 DecompressLZ77(src, len(src)) 还原的流。
 // 长度 <4 的输入用零填充到最短字面量块（解压端按声明尺寸截断还原），
 // 空输入输出单个 0x11 终止符。
 func CompressLZ77(src []byte) []byte {
@@ -211,7 +207,7 @@ func lzWriteMatch(out []byte, Dist, Length, litCount int) []byte {
 	}
 }
 
-// ---- R2007 (AC1021) R21 压缩 ----
+// R2007 (AC1021) R21 压缩。
 
 // r21MaxMatchLen 单条匹配指令可编码的最大复制长度：
 // 16 位偏移扩展格式的长度上限（0xF800 + 0x7F8 + 0x7 + 0x100）。
@@ -277,7 +273,7 @@ func init() {
 	}
 }
 
-// CompressR21 将 src 压缩为可被 decompressR21(src, len(src)) 还原的流。
+// CompressR21 将 src 压缩为可被 DecompressR21(src, len(src)) 还原的流。
 // 空输入返回空流（解压端对 dstSize=0 直接返回）；长度 <8 时用 0x20 引导
 // 头编码短字面量（引导长度字段仅 3 位），否则以字面量长度 opcode 开流。
 func CompressR21(src []byte) []byte {
@@ -369,9 +365,9 @@ func r21WriteMatch(out []byte, Dist, Length, nextLit int) []byte {
 	}
 }
 
-// r21AppendLiteral 按解压端块重排怪癖写入字面量：cp16 为两个 8 字节半块
-// 交换，级联后每 32 字节块呈 4 个 8 字节半块完全逆序；余数块按
-// r21ChunkOrder 置换。
+// r21AppendLiteral 按 R21 解码器的字节重排规则写入字面量。
+// 每 32 字节按四个 8 字节子块倒序写入；不足 32 字节的尾部使用
+// r21ChunkOrder 中对应长度的置换表。
 func r21AppendLiteral(out []byte, lit []byte) []byte {
 	i := 0
 	for ; len(lit)-i >= 32; i += 32 {

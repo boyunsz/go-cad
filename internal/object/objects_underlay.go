@@ -1,9 +1,9 @@
-// 本文件实现 UNDERLAY 引用实体（PDFUNDERLAY/DWFUNDERLAY/DGNUNDERLAY）
-// 的位级解码：dwg2.spec DWG_ENTITY(PDFUNDERLAY) 的 UNDERLAY_fields。
-// 该类为实体布局（实体公共头 + 专有字段 + COMMON_ENTITY_HANDLE_DATA），
-// 但在本仓架构中经对象分发（isEntityType 不识别该类，此前以
-// UNKNOWN_OBJ 兜底）；此处复用实体头扫描（scanEntityBest）正确定位
-// 后读取专有字段，结果转为 objGeneric 记录，字段键对齐 dwgread JSON。
+// 本文件为对象解码流程提供 PDF、DWF 和 DGN 底图引用的解析适配。
+//
+// 解析器复用实体公共头扫描，再读取插入变换、显示属性和裁剪边界，
+// 并将结果转换为 ObjGeneric。外部底图内容不在此处读取或渲染。
+//
+// 格式参考：LibreDWG dwg2.spec 中的 UNDERLAY_fields 定义。
 
 package object
 
@@ -31,18 +31,18 @@ type underlayFields struct {
 	Owner        uint64                   // COMMON_ENTITY_HANDLE_DATA ownerhandle
 	Layer        uint64                   // COMMON_ENTITY_HANDLE_DATA layer
 	ObjSizeBit   uint64                   // handle 流起点（body 局部位，公共头扫描结果）
-	AuditBitsize uint64                   // gold 口径 bitsize
+	AuditBitsize uint64                   // 参考 JSON 规则 bitsize
 	Head         *entity.CommonEntityHead // 公共头扫描结果（preview/color 等提取源）
 }
 
-// decodeUnderlayEntity 解析 UNDERLAY 引用实体并转为 objGeneric。
+// decodeUnderlayEntity 解析 UNDERLAY 引用实体并转为 ObjGeneric。
 // r 已定位到类型码之后（body 局部坐标）；rec/ver 用于实体头布局选择。
 func decodeUnderlayEntity(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver container.DwgVersion, typeCode uint16, className string) (*ObjGeneric, error) {
 	base := R.TellBits()
 	dataEnd := rec.DataEndBit()
 	// 实体头布局：typecode 后先有流内 RL objSize（R2010+ 除外）再有
 	// 主句柄（H），与对象头顺序不同。逐布局探出主句柄供
-	// scanEntityBest 的头句柄一致性校验，再回卷交给扫描
+	// ScanEntityBest 的头句柄一致性校验，再回卷交给扫描
 	parsers := entity.HeadParsersForVersion(Ver)
 	var objHandle uint64
 	for _, p := range parsers {
@@ -125,7 +125,7 @@ func decodeUnderlayEntity(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver 
 		ObjField{"has_ds_data", head.HasDsBinary},
 		ObjField{"dxfname", g.Name},
 	)
-	// 位串收集（对齐 UNKNOWN_OBJ 兜底语义）：hdOffsetBits 为类型码后
+	// 位串收集（对齐 UNKNOWN_OBJ 回退语义）：hdOffsetBits 为类型码后
 	// 前导位，headRawBits 覆盖公共头+专有字段至 handle 流起点，
 	// RawHandleBits 覆盖 handle 流起点至记录尾
 	g.HdOffsetBits = base - rec.BodyBitOffset
@@ -204,10 +204,8 @@ func readUnderlayFields(R *bitstream.BitStream, head *entity.CommonEntityHead) (
 		uf.ClipVerts = append(uf.ClipVerts, [2]float64{x, y})
 	}
 	if uf.Flag&16 != 0 {
-		// flag&16：clip_inverts 存在。语料实证（Underlay.dwg 三实例）
-		// LibreDWG 在此处已越出 bitsize 读出垃圾计数（68/7880）且 gold
-		// 输出为空数组——对齐其宽容行为：计数非法或空间不足时留空，
-		// 不作为解码失败
+		// flag 的第 4 位表示存在反向裁剪顶点。
+		// 顶点计数非法或剩余空间不足时保留空数组，继续解析其余可用数据。
 		numInv, e := R.ReadBS()
 		if e == nil && numInv <= 5000 && numInv > 0 {
 			for i := uint16(0); i < numInv; i++ {
@@ -230,7 +228,7 @@ func readUnderlayFields(R *bitstream.BitStream, head *entity.CommonEntityHead) (
 }
 
 // readBD3 读三个 BD（FIELD_3BD / FIELD_3DPOINT / FIELD_3BD_1 的解码端
-// 均为三个 BD，DD 差分语义由 readBD 内建）。
+// 均为三个 BD，DD 差分语义由 ReadBD 内建）。
 func readBD3(R *bitstream.BitStream) ([]float64, error) {
 	x, err := R.ReadBD()
 	if err != nil {

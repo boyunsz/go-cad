@@ -1,7 +1,9 @@
-// entities.go 实现 DWG 实体解码：公共实体头（R13/R14 专用解析器 +
-// R2000~R2018 各版本候选布局，headParsersForVersion）、handle 流解析，
-// 以及渲染路径所需的图元字段解码（LINE/LWPOLYLINE/CIRCLE/ARC/TEXT/MTEXT/POINT/ELLIPSE/INSERT）。
-// 字段序与位语义对照 LibreDWG dwg.spec / ODA 规范逐位校准。
+// Package entity 定义 DWG 实体类型，并提供实体记录的字段解码。
+//
+// 解析流程处理公共实体头、句柄引用及各类几何和文字实体。公共头解析
+// 根据 DWG 版本选择布局；复杂实体的字段解码分布在对应实体文件中。
+//
+// 格式参考：LibreDWG 的 dwg.spec 及 ODA DWG 格式说明。
 package entity
 
 import (
@@ -34,7 +36,7 @@ type EntColor struct {
 // CommonEntityHead 公共实体头（所有实体共享的解码结果）。
 type CommonEntityHead struct {
 	ObjSizeBit     uint64 // 数据区结束位（handle 流起点）
-	AuditBitsize   uint64 // gold 口径 bitsize（数据区起点到 handle 流的位距，审计导出用）
+	AuditBitsize   uint64 // 诊断用 bitsize：数据区起点到句柄流起点的位数。
 	Handle         uint64
 	Color          EntColor
 	EntityMode     uint8
@@ -57,8 +59,7 @@ type CommonEntityHead struct {
 	prevNextLinks  bool     // R13~R2000 语义：!nolinks 时 handle 流含 prev/next_entity
 	IsByLayerLtype bool     // isbylayerlt 位（R13/R14 输出）
 	eed            []entEED // EED 应用数据链（组码对已解析，审计导出用）
-	// 公共 handle 流的次级句柄（批次 B 建模：原读后即弃，保存供
-	// gold 键导出对照；0 表示无该句柄）
+	// 公共句柄流中的辅助引用，供字段诊断和导出使用；0 表示未设置。
 	prevEntity      uint64 // prev_entity 链接句柄（R13~R2000）
 	nextEntity      uint64 // next_entity 链接句柄（R13~R2000）
 	xdicObjHandle   uint64 // 扩展字典句柄（xdic_missing=0 时）
@@ -80,7 +81,7 @@ func CadTraceField(on bool, from, to uint64, Name, val string) {
 	}
 }
 
-// cadTraceFieldInt 整数字段 trace（cadTraceField 的惰性变体）：trace 关闭
+// cadTraceFieldInt 整数字段 trace（CadTraceField 的惰性变体）：trace 关闭
 // 时不做任何格式化求值——调用点遍布公共头解码热路径，原样内联
 // fmt.Sprintf("%d", v) 会在 on=false 时也付出格式化开销（pprof ~6%）。
 // 有符号格式化（%d 语义，负数带 - 号），与 fmt 输出逐字符一致。
@@ -98,7 +99,7 @@ func cadTraceFieldF64(on bool, from, to uint64, Name string, v float64) {
 	}
 }
 
-// entEEDPair EED 应用数据中的单个组码对（对齐 gold JSON 展平结构）。
+// entEEDPair EED 应用数据中的单个组码对（对齐 参考 JSON 展平结构）。
 type entEEDPair struct {
 	Code  int64
 	Value any // string/float64/int64；二进制/句柄/3RD 为切片（审计不比对）
@@ -156,9 +157,7 @@ func parseEEDPairs(raw []byte, unicodeText bool) []entEEDPair {
 		case 0: // 字符串；R2007+ 为 RS len + TU，此前为 RC len + [RS_BE codepage] + bytes
 			var l int
 			if unicodeText {
-				// R2007+ 的 code-0 串：len 为 RS（2 字节 LE）+ TU 字符流
-				// （trace ex2007：raw 00 18 00 41 00 63…，与旧版 RC len +
-				// 跳 2 字节读法错位 2 字节，LIGHT EED 实证）
+				// R2007 及之后版本的 code-0 字符串使用小端 RS 长度和 TU 字符数据。
 				if !need(2) {
 					ok = false
 					break
@@ -183,8 +182,7 @@ func parseEEDPairs(raw []byte, unicodeText bool) []entEEDPair {
 					ok = false
 					break
 				}
-				// codepage 为 RS_BE 大端（LibreDWG bit_read_RS_BE），按文档
-				// 码页族解码（fzw EED 中文串按 GBK 实证）
+				// codepage 使用大端 RS 编码，后续文字按该码页解码。
 				cp := uint16(raw[pos])<<8 | uint16(raw[pos+1])
 				pos += 2
 				val = bitstream.DecodeCodepage(raw[pos:pos+l], cp)
@@ -275,12 +273,10 @@ func utf16BEToString(us []uint16) string {
 	return string(runes)
 }
 
-// ParseEntityColorHead 解析公共实体头中的颜色段（R13+ 全版本同构，
-// 已经多版本样本逐位 trace 验证）。位流结构为可变长 BS（R2004+ ENC raw）：
-// 首位 1 → 短格式（次位 1=ByLayer 256、0=ByBlock 0）；首位 0 → 次位
-// 1=RC 索引、0=RS 16 位 raw（raw=flag<<8|index，flag 0x80→rgb BL、
-// 0x20→alpha BL）。raw 的 flag/index/alpha 原始值保存供审计导出。
-// on 为 trace 开关（CAD_TRACE_HANDLE 调试用）。
+// ParseEntityColorHead 读取公共实体头中的颜色编码，并保存原始标记。
+// 短格式表示 ByLayer 或 ByBlock；其他格式读取 RC 索引或 RS 原始值。
+// 原始值中的 0x80 和 0x20 标志分别控制 RGB 和透明度字段的读取。
+// on 控制字段跟踪输出，供 CAD_TRACE_HANDLE 调试使用。
 func ParseEntityColorHead(r *bitstream.BitStream, Head *CommonEntityHead, on bool) error {
 	Color := &Head.Color
 	// color ENC（LibreDWG common_entity_data.spec SINCE R_2004a）：BS 读出
@@ -410,7 +406,7 @@ func ParseCommonEntityHeadR14(r *bitstream.BitStream, _ uint64) (CommonEntityHea
 	if err != nil {
 		return Head, err
 	}
-	// R13/R14 流内 RL objSize 单位为位；其值即 gold bitsize（数据区起点到 handle 流）
+	// R13/R14 流内 RL objSize 单位为位；其值即 参考 JSON bitsize（数据区起点到 handle 流）
 	Head.ObjSizeBit = uint64(objSize)
 	Head.AuditBitsize = Head.ObjSizeBit
 	Head.R13r14 = true
@@ -701,9 +697,9 @@ func collectEntityRawBits(r *bitstream.BitStream, b *BaseEntity, Head *CommonEnt
 }
 
 // AttachEntityRecordMeta 回填源记录元数据（解码侧挂载）：重解码端重建
-// objectRecord 时需要 MS size 与 R2010+ 的 UMC 元数据（dataEndBit 推导
-// 依赖 size/handleSizeFieldBits/handleStreamSizeBits/bodyBitOffset），
-// 这些值无法在 scanEntityBest 内部获得，由版本化解码入口补记。
+// ObjectRecord 时需要 MS size 与 R2010+ 的 UMC 元数据（dataEndBit 推导
+// 依赖 size/handleSizeFieldBits/handleStreamSizeBits/BodyBitOffset），
+// 这些值无法在 ScanEntityBest 内部获得，由版本化解码入口补记。
 func AttachEntityRecordMeta(ent any, rec *objrec.ObjectRecord) {
 	if ent == nil || rec == nil {
 		return
@@ -844,8 +840,7 @@ func DeBoor(Ctrl []Point3, Weights []float64, Knots []float64, Degree, knotSpan 
 	return d[Degree]
 }
 
-// EntityBase 提取实体公共字段（any 装箱的图元转公共头指针；非图元实体
-// 返回 nil）。原根包 entBase 随实体层上提。
+// EntityBase 返回已支持实体的公共字段指针；不支持的值类型返回 nil。
 func EntityBase(ent any) *BaseEntity {
 	if ec, ok := ent.(EntityCommon); ok {
 		return ec.Common()
@@ -860,18 +855,18 @@ type BaseEntity struct {
 	Layer         uint64
 	Owner         uint64
 	Mode          uint8             // 原始 entmode：0=块内（有 owner）1=图纸空间 2=模型空间 3=其他
-	ObjSizeBit    uint64            // handle 流起点位（公共头扫描结果），审计对照 gold bitsize 用
-	RecSize       uint32            // 记录 MS size（字节），审计对照 gold size 用
+	ObjSizeBit    uint64            // handle 流起点位（公共头扫描结果），审计对照 参考 JSON bitsize 用
+	RecSize       uint32            // 记录 MS size（字节），审计对照 参考 JSON size 用
 	Head          *CommonEntityHead // 解码出的公共头（扫描产物），供审计字段导出
 	Extra         map[string]any    // per-type 扩展字段（thickness/extrusion 等），审计导出用
-	TypeName      string            // 实体类型名（如 LINE/CIRCLE），审计对照 gold entity 键
+	TypeName      string            // 实体类型名（如 LINE/CIRCLE），审计对照 参考 JSON entity 键
 	TypeCode      uint16            // 类型码
 	Nolinks       bool              // 无链接标志（公共头）
 	Isbylayerlt   bool              // 按图层线型标志（公共头）
 	PreviewExists bool              // 预览存在标志
 	eed           []entEED          // EED 应用数据链（公共头解析产物）
 
-	// ---- round-trip 位串收集（生产解码路径默认填充，供写出回放与测试共用，字段名对齐 objGeneric）----
+	// round-trip 位串收集（生产解码路径默认填充，供写出回放与测试共用，字段名对齐 ObjGeneric）。
 	// 回放方案保持 body 坐标系不变：preBits 从 body 局部 0 起（含类型码
 	// 前导），headRawBits 至 handle 流起点（含流内 RL objSize 原值），
 	// RawHandleBits 至记录尾（含 R2007+ 字符串区与 R2010+ 尾部 UMC）
@@ -882,7 +877,7 @@ type BaseEntity struct {
 	SizeBytes     uint32 // 源记录 MS size
 	HSizeField    uint32 // R2010+ handle-stream-size 字段位宽
 	HssBits       uint32 // R2010+ handle-stream-size 值（位）
-	BodyBitOff    uint64 // 源记录 bodyBitOffset（MS 结束位偏移）
+	BodyBitOff    uint64 // 源记录 BodyBitOffset（MS 结束位偏移）
 }
 
 // Mode2 是否模型空间直属实体。
@@ -909,7 +904,7 @@ func decodeOwnerLayer(r *bitstream.BitStream, Head *CommonEntityHead) (Owner, La
 
 // decodeTextStyleHandle 扫描实体 handle 流的文本样式句柄（TEXT/ATTRIB/MTEXT
 // 专有段：公共句柄序之后的首个句柄引用，各版本同位）。失败返回 0（不阻断
-// 主解码，与 decodeOwnerLayer 同宽容口径）。
+// 主解码，与 decodeOwnerLayer 同宽容规则）。
 func decodeTextStyleHandle(r *bitstream.BitStream, Head *CommonEntityHead) uint64 {
 	savedByte, savedBit := r.Cursor()
 	r.SetBitPos(Head.ObjSizeBit)
@@ -923,7 +918,7 @@ func decodeTextStyleHandle(r *bitstream.BitStream, Head *CommonEntityHead) uint6
 	return Style
 }
 
-// ---- 各图元 ----
+// 各图元。
 
 // EntLine 线段图元。
 type EntLine struct {
@@ -958,7 +953,7 @@ type EntEllipse struct {
 	BaseEntity
 	Center    Point3
 	MajorAxis Point3  // 主轴向量（长度即主轴半径）
-	Extrusion Point3  // 挤出向量（主体 3BD，ratio 之前；gold extrusion 键导出）
+	Extrusion Point3  // 挤出向量（主体 3BD，ratio 之前；参考 JSON extrusion 键导出）
 	Ratio     float64 // 短轴/主轴比
 	StartAng  float64
 	EndAng    float64
@@ -974,12 +969,12 @@ type EntLwPolyline struct {
 	Vertices   []Point2
 	Bulges     []float64     // 与 vertices 对齐（缺失补 0）
 	Widths     []lwPolyWidth // flag&32（R2000 HAS_NUM_WIDTHS）时的逐段起端/末端宽
-	Elevation  float64       // flag&8 时的标高 BD（gold elevation 键）
-	ConstWidth float64       // flag&4 时的常量宽度 BD（gold const_width 键）
-	Thickness  float64       // flag&2 时的厚度 BD（gold thickness 键）
+	Elevation  float64       // flag&8 时的标高 BD（参考 JSON elevation 键）
+	ConstWidth float64       // flag&4 时的常量宽度 BD（参考 JSON const_width 键）
+	Thickness  float64       // flag&2 时的厚度 BD（参考 JSON thickness 键）
 }
 
-// lwPolyWidth LWPOLYLINE 单段宽度（gold widths[i].start/end 键）。
+// lwPolyWidth LWPOLYLINE 单段宽度（参考 JSON widths[i].start/end 键）。
 type lwPolyWidth struct {
 	Start float64
 	End   float64
@@ -1007,8 +1002,8 @@ type EntText struct {
 	AlignPt     *Point2
 	Gen         uint16
 	WidthFactor float64 // 宽度因子（DXF 41；dataflags 位可省略，0=未读按 1 用）
-	Extrusion   Point3  // 挤出向量（主体 BE，读入保存；gold extrusion 键导出）
-	StyleHandle uint64  // 文本样式句柄（handle 流专有段首项，gold style 键导出）
+	Extrusion   Point3  // 挤出向量（主体 BE，读入保存；参考 JSON extrusion 键导出）
+	StyleHandle uint64  // 文本样式句柄（handle 流专有段首项，参考 JSON style 键导出）
 }
 
 // EntMText 多行文本。
@@ -1021,8 +1016,8 @@ type EntMText struct {
 	TextHeight  float64
 	Attachment  uint16
 	LineFactor  float64 // 行距系数（DXF 44，R2000+ 存储；渲染 MTEXT 行距 = 系数×字高）
-	Extrusion   Point3  // 挤出向量（主体 3BD，读入保存；gold extrusion 键导出）
-	StyleHandle uint64  // 文本样式句柄（handle 流专有段，gold style 键导出）
+	Extrusion   Point3  // 挤出向量（主体 3BD，读入保存；参考 JSON extrusion 键导出）
+	StyleHandle uint64  // 文本样式句柄（handle 流专有段，参考 JSON style 键导出）
 }
 
 // EntInsert 块参照。
@@ -1031,10 +1026,10 @@ type EntInsert struct {
 	Position    Point3
 	Scale       Point3
 	Rotation    float64
-	Extrusion   Point3 // 挤出向量（主体 3BD，读入保存；gold extrusion 键导出）
+	Extrusion   Point3 // 挤出向量（主体 3BD，读入保存；参考 JSON extrusion 键导出）
 	BlockHeader uint64
 	Attribs     []uint64 // 关联 ATTRIB 的句柄
-	Seqend      uint64   // SEQEND 结束句柄（handle 流 attribs 后，gold seqend 键导出）
+	Seqend      uint64   // SEQEND 结束句柄（handle 流 attribs 后，参考 JSON seqend 键导出）
 }
 
 // EntAttrib 块属性文本（ATTDEF 复用，prompt/default_value 仅 ATTDEF 有值）。
@@ -1046,30 +1041,30 @@ type EntAttrib struct {
 	Height      float64
 	Rotation    float64
 	Prompt      string  // ATTDEF 提示串
-	HAlign      uint16  // 水平对齐（gold horiz_alignment）
-	VAlign      uint16  // 垂直对齐（gold vert_alignment）
-	Gen         uint16  // 文字生成标志（gold generation）
-	AlignPt     *Point2 // 对齐点（gold alignment_pt，与 TEXT 同构；缺省 nil）
+	HAlign      uint16  // 水平对齐（参考 JSON horiz_alignment）
+	VAlign      uint16  // 垂直对齐（参考 JSON vert_alignment）
+	Gen         uint16  // 文字生成标志（参考 JSON generation）
+	AlignPt     *Point2 // 对齐点（参考 JSON alignment_pt，与 TEXT 同构；缺省 nil）
 	WidthFactor float64 // 宽度因子（与 TEXT 同构；0=未读按 1 用）
-	Extrusion   Point3  // 挤出向量（与 TEXT 同构继承；gold extrusion 键导出）
-	StyleHandle uint64  // 文本样式句柄（handle 流专有段首项，gold style 键导出）
+	Extrusion   Point3  // 挤出向量（与 TEXT 同构继承；参考 JSON extrusion 键导出）
+	StyleHandle uint64  // 文本样式句柄（handle 流专有段首项，参考 JSON style 键导出）
 }
 
 // EntBlockLike 块结构标记实体（BLOCK 块开始 / ENDBLK 块结束 / SEQEND
 // 序列结束）：无几何字段，BLOCK 仅多块名 name（与配对 BLOCK_HEADER
-// 对象同名；gold JSON 中三者均以 entity 键输出为普通实体）。
+// 对象同名；参考 JSON 中三者均以 entity 键输出为普通实体）。
 type EntBlockLike struct {
 	BaseEntity
 	Name string // 块名（仅 BLOCK 有；ENDBLK/SEQEND 恒空）
 }
 
-// point2/point3 平面与空间坐标点。
+// Point2/point3 平面与空间坐标点。
 type Point2 struct{ X, Y float64 }
 
 type Point3 struct{ X, Y, Z float64 }
 
 // HdlSizeFieldBits R2010+ 记录头的 handle-stream-size (UMC) 字段位宽。
-// 该字段位于对象数据区之前，gold bitsize 不含它，审计导出时需扣除。
+// 该字段位于对象数据区之前，参考 JSON bitsize 不含它，审计导出时需扣除。
 func HdlSizeFieldBits(h objrec.ObjHeader) uint64 {
 	if h.Rec == nil {
 		return 0
@@ -1081,7 +1076,7 @@ func HdlSizeFieldBits(h objrec.ObjHeader) uint64 {
 type headParser struct {
 	Name  string
 	Parse func(*bitstream.BitStream, uint64) (CommonEntityHead, error)
-	// externalSize 为 true 表示 bitsize 不在流内存储（R2010+），由记录头
+	// ExternalSize 为 true 表示 bitsize 不在流内存储（R2010+），由记录头
 	// 推导；审计导出 bitsize 时需从 dataEnd 扣除 hdl size 字段位宽。
 	ExternalSize bool
 }
@@ -1198,11 +1193,12 @@ func EntityGeometryFinite(ent any) bool {
 	return true
 }
 
-// ScanEntityBest 两阶段候选扫描：先 0..64 位逐位，全部无高分候选时
-// 改按字节对齐（步长 8）扫到 1024 位宽容兜底。评分下限 20 过滤错位产物。
-// 快路径：布局已与参考实现逐位对齐，delta=0 且解析出的句柄与记录句柄一致、
-// 几何有限时直接采信，避免评分误选错位候选。
-// hdlFieldBits 为 R2010+ 记录头 handle-stream-size 字段位宽（bitsize 导出扣除用）。
+// ScanEntityBest 尝试公共实体头布局，并按解码结果选择候选。
+// 先在 Base 处尝试快速路径：句柄须匹配、声明长度不得越界且几何值有限。
+// 快速路径失败后，依次扫描 0–64 位、-8–0 位及 64–1024 位偏移，最后
+// 一段使用 8 位步长；候选按公共头和几何评分选择。
+// hdlFieldBits 是 R2010 及之后版本句柄流长度字段的位宽，导出 bitsize
+// 时须扣除。
 func ScanEntityBest(
 	r *bitstream.BitStream,
 	Base uint64,
@@ -1215,14 +1211,14 @@ func ScanEntityBest(
 	TypeCode uint16,
 	decode func(r *bitstream.BitStream, Head *CommonEntityHead) (any, error),
 ) (any, int, error) {
-	// fillMeta 回填公共头扫描结果与记录元数据（审计对照 gold 键用）；
+	// fillMeta 回填公共头扫描结果与记录元数据（审计对照 参考字段用）；
 	// startBit 为最终命中候选的起始位，用于 round-trip 位串收集
 	fillMeta := func(ent any, Head *CommonEntityHead, ExternalSize bool, startBit uint64) {
 		if ec, ok := ent.(EntityCommon); ok {
 			b := ec.Common()
 			b.ObjSizeBit = Head.AuditBitsize
 			if ExternalSize {
-				// R2010+：数据区结束位含头部 UMC 字段，gold bitsize 不含
+				// R2010+：数据区结束位含头部 UMC 字段，参考 JSON bitsize 不含
 				b.ObjSizeBit = dataEnd - hdlFieldBits
 			}
 			b.RecSize = RecSize
@@ -1254,9 +1250,8 @@ func ScanEntityBest(
 			}
 			continue
 		}
-		// 流内 RL objSize（单位=位，即数据区起点到 handle 流）不得超过数据区
-		// 总位长；错位候选会读出垃圾值（ACIS 系 R2007 实证 21200>13808 等），
-		// 布局必然错位，不可走快路径直接采信
+		// 内联 objSize 的单位为位，不得超过记录的数据区长度。
+		// 长度越界的候选不能进入快速路径。
 		if !variant.ExternalSize && Head.AuditBitsize > dataEnd-Base {
 			if cadTraceHandle == objHandle {
 				fmt.Fprintf(os.Stderr, "[fast] handle=%d layout=%s objSize %d 超数据区位长 %d\n",
@@ -1579,9 +1574,9 @@ type EntSpline struct {
 	ControlPoints []Point3
 	Weights       []float64
 	FitPoints     []Point3
-	begTanVec     Point3 // 起点切线（拟合点模式 3BD，gold beg_tan_vec 键导出）
-	endTanVec     Point3 // 终点切线（拟合点模式 3BD，gold end_tan_vec 键导出）
-	StyleHandle   uint64 // 样式句柄（handle 流 H 340，gold style 键导出）
+	begTanVec     Point3 // 起点切线（拟合点模式 3BD，参考 JSON beg_tan_vec 键导出）
+	endTanVec     Point3 // 终点切线（拟合点模式 3BD，参考 JSON end_tan_vec 键导出）
+	StyleHandle   uint64 // 样式句柄（handle 流 H 340，参考 JSON style 键导出）
 }
 
 // DecodeSpline SPLINE：scenario BL + [R2013+ flags BL + 节点参数 BL] + degree BL，
@@ -1637,7 +1632,7 @@ func DecodeSpline(r *bitstream.BitStream, Head *CommonEntityHead, R2013Plus bool
 		}
 	}
 	// 审计导出键（R2013+ 的 splineflags/knotparam 非 R2013 恒 0；
-	// beg/end_tan_vec 拟合点模式 3BD，控制点模式 gold 无键不导出）
+	// beg/end_tan_vec 拟合点模式 3BD，控制点模式 参考 JSON 无键不导出）
 	sp.Extra = map[string]any{
 		"scenario": int64(Scenario), "degree": int64(Degree),
 		"splineflags": int64(SplineFlags1), "knotparam": int64(KnotParameter),
@@ -1659,8 +1654,7 @@ func DecodeSpline(r *bitstream.BitStream, Head *CommonEntityHead, R2013Plus bool
 	for i, w := range sp.Weights {
 		sp.Extra[fmt.Sprintf("ctrl_pts[%d].w", i)] = w
 	}
-	// handle 流（批次 B 建模：owner/layer 公共序 + style 句柄，gold
-	// layer/next_entity/prev_entity/style 键导出）
+	// 读取公共句柄及文字样式句柄，供图层关联和字段导出使用。
 	r.SetBitPos(Head.ObjSizeBit)
 	if Owner, Layer, e := ParseCommonEntityHandles(r, Head); e == nil {
 		sp.Owner, sp.Layer = Owner, Layer
@@ -1767,11 +1761,11 @@ func parseSplineFitData(r *bitstream.BitStream, sp *EntSpline) error {
 	if sp.FitTolerance, err = r.ReadBD(); err != nil {
 		return err
 	}
-	bx, by, bz, err := r.Read3BD() // 起点切线（读入保存，gold beg_tan_vec 键导出）
+	bx, by, bz, err := r.Read3BD() // 起点切线（读入保存，参考 JSON beg_tan_vec 键导出）
 	if err != nil {
 		return err
 	}
-	ex, ey, ez, err := r.Read3BD() // 终点切线（读入保存，gold end_tan_vec 键导出）
+	ex, ey, ez, err := r.Read3BD() // 终点切线（读入保存，参考 JSON end_tan_vec 键导出）
 	if err != nil {
 		return err
 	}
@@ -1969,9 +1963,8 @@ func decodeLwPolyline(r *bitstream.BitStream, Head *CommonEntityHead, codepage u
 	}
 	extrusion := Point3{Z: 1}
 	if Flags&0x01 != 0 {
-		// extrusion 是 FIELD_3BD（3×BD 独立编码，无 BE 的默认前缀位）：
-		// dwg.spec 注明该位与 DXF closed 512 冲突，fzw h=6610926 实证
-		// (0,0,-1) 占 70bit（2+2+66），多读 1 位即令 num_points 错位
+		// extrusion 使用 FIELD_3BD，由三个独立 BD 值组成。
+		// 此处不读取 BE 的默认值标志，以保持后续 num_points 的位位置。
 		x, y, z, e := r.Read3BD()
 		if e != nil {
 			return nil, e
@@ -2116,7 +2109,7 @@ func decodeText(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16)
 	if err != nil {
 		return nil, err
 	}
-	var textExtrusion Point3 // 主体 BE 挤出向量（gold extrusion 键导出）
+	var textExtrusion Point3 // 主体 BE 挤出向量（参考 JSON extrusion 键导出）
 	var Elevation float64
 	if dataFlags&TextFlagNoElevation == 0 {
 		if Elevation, err = r.ReadRD(); err != nil {
@@ -2203,15 +2196,10 @@ func decodeText(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16)
 	}, nil
 }
 
-// decodeTextUnicode R2007 TEXT 解码（字符串区路径）：text_value 位于对象
-// 尾部字符串流（LibreDWG FIELD_T 在 R2007+ 重定向 str_dat，主体位流的
-// T 位点不消耗位），主体位流依次为 dataflags RC → 标量段（按 dataflags
-// 位跳过）→ generation/horiz_alignment/vert_alignment BS（spec 固定序，
-// chuandongzhou trace @53.4 实证 hAlign 紧随 height、TU 位置不推进）。
-// 该路径不走候选评分：位流错位候选的字符可读性分可能反超短文本正确解
-// （chuandongzhou "A" 13 分 < 错位串 15 分），故仅采纳经 has_strings 位
-// 与 data_size 双重校验的字符串流结果；流不可读或标量段失败时返回
-// false，由调用方回退 R21 候选评分路径（与 decodeAttribUnicode 同模式）。
+// decodeTextUnicode 从 R2007 及之后版本的独立字符串区读取 TEXT。
+// 主体流读取 dataflags、条件标量以及文字生成和对齐字段；文字读取不推进
+// 主体流位置。字符串区标志、长度或标量读取失败时返回 false，交由
+// 调用方尝试其他解析路径。
 func decodeTextUnicode(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16) (*EntText, bool) {
 	strs := readStringAreaStrings(r, Head, 1)
 	if len(strs) == 0 {
@@ -2249,7 +2237,7 @@ func decodeTextUnicode(r *bitstream.BitStream, Head *CommonEntityHead, codepage 
 		AlignPt = &Point2{ax, ay}
 	}
 	var textExtrusion Point3
-	if tex, tey, tez, eErr := r.ReadBE(); eErr != nil { // extrusion（读入保存，gold extrusion 键导出）
+	if tex, tey, tez, eErr := r.ReadBE(); eErr != nil { // extrusion（读入保存，参考 JSON extrusion 键导出）
 		return nil, false
 	} else {
 		textExtrusion = Point3{tex, tey, tez}
@@ -2368,7 +2356,7 @@ func indexPermutations(n int) [][]int {
 // decodeR21TextTail R2010+/R2007+ 文本尾解析：generation/hAlign/vAlign 与
 // 字符串的相对顺序存在歧义，字符串有 TU/TV 两种编码。枚举「字段全排列 ×
 // 编码 × 切分点」候选，按字符可读性与对齐值合理性评分取最优（并列保留
-// 首个）；全部候选失败时按旧版字段顺序 + 双编码兜底重试。
+// 首个）；全部候选失败时按旧版字段顺序 + 双编码回退重试。
 func decodeR21TextTail(r *bitstream.BitStream, dataFlags uint8, codepage uint16) (Text string, Gen, HAlign, VAlign uint16, err error) {
 	var present []textTailField
 	for _, f := range []textTailField{{TextFlagNoGen, 0}, {TextFlagNoHAlign, 1}, {TextFlagNoVAlign, 2}} {
@@ -2446,7 +2434,7 @@ func decodeR21TextTail(r *bitstream.BitStream, dataFlags uint8, codepage uint16)
 	if hasBest {
 		return bestText, bestGen, bestH, bestV, nil
 	}
-	// 兜底：旧版字段顺序 + 两种编码
+	// 回退：旧版字段顺序 + 两种编码
 	for _, tu := range []bool{true, false} {
 		r.Restore(savedByte, savedBit)
 		s, e := readStr(r, tu)
@@ -2723,7 +2711,7 @@ func DecodeMText(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16
 	if err != nil {
 		return nil, err
 	}
-	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，gold 键导出）
+	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，参考字段导出）
 	if err != nil {
 		return nil, err
 	}
@@ -2759,8 +2747,7 @@ func DecodeMText(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16
 	if err != nil {
 		return nil, err
 	}
-	// R2007+ 文字存于记录尾部字符串区（LibreDWG obj_string_stream 机制）：
-	// [文字区 data_size 字节][has_strings B @bitsize-1][data_size RS @bitsize-17][handle 流]
+	// R2007 及之后版本的文字从记录尾部独立字符串区读取，边界由尾部标志和长度字段确定。
 	var Text string
 	if strs := readStringAreaStrings(r, Head, 1); len(strs) > 0 {
 		// R2007+ 字符串区命中：text 在数据流中不占位（obj string stream 机制）
@@ -2839,12 +2826,9 @@ func DecodeMText(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16
 			if ct, e := r.ReadBS(); e == nil {
 				columnType = int64(ct)
 			}
-			// 分栏尾段（spec SINCE R_2018，column_type!=0 时存在）：
-			// 计数 BL → 列宽 BD → 间距 BD → 自适应高 B → 流反转 B →
-			// n×列高 BD（仅 !auto_height && column_type==2；type==1 时
-			// 该 BL 键为 numfragments，无列高）。字段序经 dwg.spec MTEXT
-			// decoder 段与 sunmingle trace @111.5 逐位实证，与 dwgread
-			// gold 的 JSON 键序（width/gutter/auto/flow/heights）一致。
+			// 读取 R2018 MTEXT 的分栏尾部，column_type 非零时存在。
+			// 依次为计数、列宽、列间距、自动高度标志和流反转标志；仅在非自动
+			// 高度且 column_type 为 2 时读取逐列高度。
 			if columnType != 0 {
 				if cnt, e := r.ReadBL(); e == nil {
 					colHeightCount = int64(cnt)
@@ -3001,7 +2985,7 @@ func DecodeInsert(r *bitstream.BitStream, Head *CommonEntityHead, ver container.
 	if err != nil {
 		return nil, err
 	}
-	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，gold extrusion 键导出）
+	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，参考 JSON extrusion 键导出）
 	if err != nil {
 		return nil, err
 	}
@@ -3043,7 +3027,7 @@ func DecodeInsert(r *bitstream.BitStream, Head *CommonEntityHead, ver container.
 						attribHandles = append(attribHandles, h)
 					}
 				}
-				// SEQEND 结束句柄（attribs 之后恒在，gold seqend 键导出）
+				// SEQEND 结束句柄（attribs 之后恒在，参考 JSON seqend 键导出）
 				if h, e := objrec.ReadHandleReference(r, Head.Handle); e == nil {
 					seqendHandle = h
 				}
@@ -3185,7 +3169,7 @@ func ParseCommonEntityHeadR2013B(r *bitstream.BitStream, dataEnd uint64) (Common
 				if err != nil {
 					return Head, err
 				}
-				// 同上：保留完整 32 位对齐 LibreDWG rgb 键口径
+				// 同上：保留完整 32 位对齐 LibreDWG rgb 键规则
 				Head.Color.TrueColor, Head.Color.HasTrue = Rgb, true
 			}
 			if Flags&0x2000 != 0 {
@@ -3238,9 +3222,9 @@ func ParseCommonEntityHeadR2013B(r *bitstream.BitStream, dataEnd uint64) (Common
 	return Head, nil
 }
 
-// ---- 版本相关的公共实体头 ----
+// 版本相关的公共实体头。
 
-// ---- 版本化文本解码 ----
+// 版本化文本解码。
 
 // decodeTextVer TEXT：R2010+ 走 R21 候选尾，R2000/R2004 走 TV 顺序字段。
 func decodeTextVer(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint16, unicodeText bool) (any, error) {
@@ -3255,7 +3239,7 @@ func decodeTextVer(r *bitstream.BitStream, Head *CommonEntityHead, codepage uint
 	if err != nil {
 		return nil, err
 	}
-	var textExtrusion Point3 // 主体 BE 挤出向量（gold extrusion 键导出）
+	var textExtrusion Point3 // 主体 BE 挤出向量（参考 JSON extrusion 键导出）
 	var Elevation float64
 	if dataFlags&TextFlagNoElevation == 0 {
 		if Elevation, err = r.ReadRD(); err != nil {
@@ -3365,7 +3349,7 @@ func DecodeMTextVer(r *bitstream.BitStream, Head *CommonEntityHead, codepage uin
 	if err != nil {
 		return nil, err
 	}
-	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，gold 键导出）
+	exx, exy, exz, err := r.Read3BD() // extrusion（读入保存，参考字段导出）
 	if err != nil {
 		return nil, err
 	}
@@ -3497,7 +3481,7 @@ func decodeAttribUnicode(r *bitstream.BitStream, Head *CommonEntityHead, ver con
 		AlignPt = &Point2{ax, ay}
 	}
 	var textExtrusion Point3
-	if tex, tey, tez, eErr := r.ReadBE(); eErr != nil { // extrusion（读入保存，gold extrusion 键导出）
+	if tex, tey, tez, eErr := r.ReadBE(); eErr != nil { // extrusion（读入保存，参考 JSON extrusion 键导出）
 		return nil, false
 	} else {
 		textExtrusion = Point3{tex, tey, tez}
@@ -3613,7 +3597,7 @@ func decodeAttribUnicode(r *bitstream.BitStream, Head *CommonEntityHead, ver con
 	Extra := map[string]any{
 		"dataflags": int64(df),
 		"thickness": Thickness,
-		// gold elevation/oblique_angle 键（R21 路径同导出口径）
+		// 参考 JSON elevation/oblique_angle 键（R21 路径同导出规则）
 		"elevation":              Elevation,
 		"oblique_angle":          Oblique,
 		"width_factor":           WidthFactor,
@@ -3657,9 +3641,8 @@ func DecodeAttribVer(r *bitstream.BitStream, Head *CommonEntityHead, codepage ui
 		t, err = decodeTextVer(r, Head, codepage, false)
 	}
 	if err != nil {
-		// annotative 等 ATTRIB 在宽度因子与文字之间存在未公开字段
-		// （实测 27 位）：常规解析失败时在窗口内前向扫描 TU/TV 文字串，
-		// 取首个可读串并同步读取位置（宽容模式，与参考实现行为对齐）。
+		// 常规属性文字解析失败时，在有限窗口内向前尝试 TU/TV 字符串。
+		// 找到可读候选后同步读取位置；这是恢复策略，不代表已识别所有中间字段。
 		if !unicodeText {
 			return nil, err
 		}
@@ -3881,7 +3864,7 @@ func DecodeAttribVer(r *bitstream.BitStream, Head *CommonEntityHead, codepage ui
 	}, nil
 }
 
-// ---- 公共实体头：版本化布局特征与解析 ----
+// 公共实体头：版本化布局特征与解析。
 
 // headFeature 公共实体头的版本化布局特征位。各版本写入端在 objSize 存储、
 // 图像尺寸编码、材质/阴影/视觉样式/ds 位、尾部线宽、nolinks 位语义与 EED
@@ -3906,12 +3889,9 @@ type headLayoutCandidate struct {
 	feats headFeature
 }
 
-// versionHeadLayouts 各版本的候选布局表（按优先序，评分择优）。布局均经
-// 多版本真实样本逐位校准：R2007 主布局 = 流内 objSize + picture RL +
-// material BB + shadow RC + lineweight RC；R2000/R2004 无 material，且
-// R2000 的独立位是 nolinks；R2010+ 的 objSize 由记录头推导、picture 走
-// BLL，R2010 无 ds 位而 R2013/R2018 有；部分源文件缺 shadow/lineweight，
-// 以降级候选兜底。
+// versionHeadLayouts 定义按版本和优先级排列的公共实体头候选布局。
+// 版本差异包括记录位数来源、预览长度编码、材质、阴影、线宽及 DS 标志。
+// 缺少部分字段的记录可尝试后续候选，最终选择仍由解析和评分结果决定。
 var versionHeadLayouts = map[container.DwgVersion][]headLayoutCandidate{
 	container.VerR2007: {
 		{"R2007", featObjSizeInStream | featPictureRL | FeatMaterialFlags | featShadowFlags | featLineWeight | featUnicodeEED},
@@ -4149,10 +4129,9 @@ func DecodeEntityFieldsVer(r *bitstream.BitStream, h objrec.ObjHeader, objHandle
 	return ent, err
 }
 
-// decodeBlockLike 解析 BLOCK/ENDBLK/SEQEND 标记实体（dwg.spec
-// DWG_ENTITY 三分支）：公共头后 BLOCK 读块名（R2007+ 为 TU，其余 TV 按
-// 文档码页，fzw 中文块名实证），ENDBLK/SEQEND 无附加字段；尾部 handle
-// 流由 decodeOwnerLayer 读取。
+// decodeBlockLike 读取 BLOCK、ENDBLK 或 SEQEND 标记实体。
+// BLOCK 另读块名，R2007 及之后版本使用 TU，早期版本按文档码页读取 TV；
+// 其他标记没有附加主体字段。所属对象和图层引用由 decodeOwnerLayer 读取。
 func decodeBlockLike(r *bitstream.BitStream, Head *CommonEntityHead, TypeName string, ver container.DwgVersion, codepage uint16) (any, error) {
 	e := &EntBlockLike{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}
 	if TypeName == "BLOCK" {
@@ -4192,7 +4171,7 @@ func decodeEntityByTypeVer(r *bitstream.BitStream, Head *CommonEntityHead, h obj
 	case "ELLIPSE":
 		return decodeEllipse(r, Head)
 	case "LWPOLYLINE":
-		// 版本枚举非时间序（verR2000=0、verR14=1），不能范围比较：
+		// 版本枚举非时间序（VerR2000=0、VerR14=1），不能范围比较：
 		// 仅 R13/R14 走 2RD 顶点，R2000+（含 R2004+）走 2DD 差分
 		return decodeLwPolyline(r, Head, codepage, ver != container.VerR13 && ver != container.VerR14)
 	case "VIEWPORT":
@@ -4208,10 +4187,8 @@ func decodeEntityByTypeVer(r *bitstream.BitStream, Head *CommonEntityHead, h obj
 	case "BODY":
 		return decodeAcis(r, Head, "BODY", ver)
 	case "TEXT":
-		// R2007+ 首选字符串区路径（text_value 在对象尾部字符串流，主体
-		// 位流的 T 位点不消耗位；LibreDWG FIELD_T 对 TEXT 恒走 str_dat，
-		// chuandongzhou 75 处 R2007 与 uhengshenhua R2018 TEXT 实证），
-		// 流不可读时回退 R21 候选评分路径。
+		// R2007 及之后版本优先从独立字符串区读取 TEXT。
+		// 主体流不消费文字数据，字符串区不可读时尝试候选评分路径。
 		if unicodeText {
 			entryByte, entryBit := r.Cursor()
 			if t, ok := decodeTextUnicode(r, Head, codepage); ok {
@@ -4303,11 +4280,8 @@ func decodeEntityByTypeVer(r *bitstream.BitStream, Head *CommonEntityHead, h obj
 	case "MULTILEADER":
 		return decodeMLeader(r, Head, ver, codepage)
 	default:
-		// UNKNOWN_ENT 兜底（dwg2.spec UNKNOWN_ENT = HANDLE_UNKNOWN_BITS）：
-		// 仅对 LibreDWG 默认构建同样兜底为 UNKNOWN_ENT 的动态类生效
-		// （如 type=528 ACAD_TABLE），主体归入 unknown_bits 位串；
-		// 其余未建模类（LIGHT/MULTILEADER 等有正式 spec 布局）保持报错，
-		// 避免以兜底产物污染审计分母，待专项实现接入
+		// 对 UnknownEntFallbackNames 中列出的类型保留 UNKNOWN_ENT 位串。
+		// 未注册回退策略的类型返回错误，避免将未解析的载荷视为完整实体。
 		if UnknownEntFallbackNames[Name] {
 			return decodeUnknownEnt(r, Head, Name)
 		}

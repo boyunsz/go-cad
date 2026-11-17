@@ -1,9 +1,10 @@
-// crc.go 实现 DWG 位流的 CRC16 计算与写出，与读侧 bitStream.readCRC 的
-// 「对齐后读 16 位」语义对称：写出端对 [startBit, 当前位) 覆盖的字节区间
-// 计算 CRC 后按 RS（小端 2 字节）写入。
-// 算法为 CRC-16/ARC（反射多项式 0xA001），初值由 seed 传入：文件头与
-// system section 惯例 0xC0C1，R2000 对象图块惯例 0x00。
-// 对应 LibreDWG 的 crctable / bit_calc_CRC / bit_write_CRC(dat, addr, 0xC0C1)。
+// 本文件实现 DWG 使用的 CRC-16 计算及校验值写入。
+//
+// 算法使用反射多项式 0xA001，初始值由调用方指定。写入时先对齐字节边界，
+// 再计算指定范围的校验值，并以小端双字节写出。
+//
+// 格式参考：LibreDWG 的 bit_calc_CRC 和 bit_write_CRC。
+
 package bitstream
 
 // crc16Table DWG CRC16 查询表：table[i] 为字节 i 独立贡献的 16 位余式，
@@ -24,7 +25,7 @@ var crc16Table = func() (t [256]uint16) {
 }()
 
 // Crc16DWG 以 seed 为初值累积计算 data 的 DWG CRC16。
-// seed 允许链式分段计算：crc16DWG(crc16DWG(s, a), b) == crc16DWG(s, a||b)。
+// seed 允许链式分段计算：Crc16DWG(Crc16DWG(s, a), b) == Crc16DWG(s, a||b)。
 func Crc16DWG(seed uint16, Data []byte) uint16 {
 	crc := seed
 	for _, b := range Data {
@@ -40,7 +41,7 @@ func (w *EncWriter) WriteCRC(startBit uint64) uint16 {
 	return w.WriteCRCSeed(startBit, 0xC0C1)
 }
 
-// WriteCRCSeed 同 writeCRC，seed 由调用方指定（对象图等场景用 0）。
+// WriteCRCSeed 同 WriteCRC，seed 由调用方指定（对象图等场景用 0）。
 func (w *EncWriter) WriteCRCSeed(startBit uint64, seed uint16) uint16 {
 	w.AlignByte()
 	start := (startBit + 7) / 8

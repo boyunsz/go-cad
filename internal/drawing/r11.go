@@ -1,10 +1,15 @@
-// r11.go 实现 pre-R13 家族（R9/AC1004、R10/AC1006、R11/AC1009）的读取。
-// 该家族与 R13+ 完全不同：字节对齐、无对象图/句柄流/位压缩，实体表与
-// 块表/层表等为固定偏移表驱动，R11 起各表与实体区以 16 字节 sentinel
-// 包夹且记录尾带 CRC。字段布局逐位对齐 LibreDWG decode_r11.c 及
-// header.spec / header_variables_r11.spec / dwg.spec / common_entity_data.spec。
-// 解码产物复用 R13+ 的实体类型（entLine 等）与 Document 模型，
-// 使 RenderPNG / Texts 全链路无差别工作。
+// 本文件实现 R13 之前的 DWG 格式解析。
+//
+// 支持版本为 R9（AC1004）、R10（AC1006）和 R11（AC1009）。解析器按
+// 字节对齐方式读取数据，通过表头偏移和记录长度定位实体、图层及块定义，
+// 不使用 R13 及之后版本的对象图和位压缩解码流程。
+//
+// 解析结果转换为 Document 和 entity 包中的公共实体类型，供文本提取、
+// 渲染和导出使用。R11 记录长度包含尾部 CRC；当前读取路径不校验 CRC。
+//
+// 格式参考：LibreDWG 的 decode_r11.c、header.spec、
+// header_variables_r11.spec、dwg.spec 和 common_entity_data.spec。
+
 package drawing
 
 import (
@@ -124,9 +129,9 @@ type preR13Header struct {
 	// tables 基本五表（BLOCK/LAYER/STYLE/LTYPE/VIEW，位于 0x2C）加上
 	// 头变量流内读出的附加表头（UCS/VPORT/APPID/DIMSTYLE/VX）
 	tables map[string]preR13Table
-	// numentities R9 头变量中的实体个数（R10+ 循环由 entities_end 界定）
+	// numEntities R9 头变量中的实体个数（R10+ 循环由 entities_end 界定）
 	numEntities int
-	// codepage 头变量流 UCS 段头后的 RS 码页编号（numheader_vars>129 才有，
+	// Codepage 头变量流 UCS 段头后的 RS 码页编号（numheader_vars>129 才有，
 	// header_variables_r11.spec 的 FIELD_RS codepage）；缺失或 0 按默认 30
 	// （windows-1252 家族，LibreDWG header.codepage 初始值）
 	Codepage uint16
@@ -268,9 +273,9 @@ func parsePreR13Document(data []byte) (*Document, error) {
 		}
 	}
 
-	// 主实体区：全部为模型空间实体（gold entmode=2），HAS_PSPACE 实体
-	// （图纸空间布局，如 ACEB10）解码后存档 pspaceSpace。
-	// R11 在 entities_start 前有 16 字节 ENTITIES_BEGIN sentinel，从 start 直接解。
+	// 读取主实体区，并将带 HAS_PSPACE 标志的实体另存到 PspaceSpace。
+	// R11 的 ENTITIES_BEGIN 哨兵位于 entities_start 前 16 字节，此处从
+	// entities_start 指定的首条记录开始解析。
 	agg := &preR13EntityAgg{}
 	preR13CP := hdr.Codepage
 	if preR13CP == 0 {
@@ -298,9 +303,8 @@ func parsePreR13Document(data []byte) (*Document, error) {
 	return doc, nil
 }
 
-// preR13Archive pre-R13 路径的实体归档（pre-R13 无对象图、不走 classify）：
-// 句柄 → entityByHandle（EntityByHandle API），ATTRIB → attribs
-// （INSERT 属性展开与 Texts 渲染路径依赖）。
+// preR13Archive 登记 R13 之前版本的实体，供句柄查询和属性展开使用。
+// 实体按句柄写入 ByHandle；ATTRIB 同时写入 Attribs。
 func preR13Archive(doc *Document, list []any) {
 	for _, ent := range list {
 		ec, ok := ent.(entity.EntityCommon)
@@ -759,7 +763,7 @@ func (a *preR13EntityAgg) step(ent any, hasAttribs bool) {
 }
 
 // preR13AppendOwned 将顶点伪句柄挂到当前 POLYLINE 的 owned 列表
-// （POLYLINE_PFACE 的 entPolylinePface 无 owned 列表，顶点仅独立存在，
+// （POLYLINE_PFACE 的 EntPolylinePface 无 owned 列表，顶点仅独立存在，
 // 与 R13+ 该类型的模型一致）。
 func preR13AppendOwned(poly any, handle uint64) {
 	switch p := poly.(type) {
@@ -772,12 +776,10 @@ func preR13AppendOwned(poly any, handle uint64) {
 	}
 }
 
-// parsePreR13Entities 解析一个实体区（主实体/附加实体）：
-// 逐实体读公共头并按类型解码，下一条实体地址 = 记录起点 + size，
-// 与字段解析解耦（单实体偏差不破坏后续定位）。
-// HAS_PSPACE（图纸空间）实体解码后存档 doc.pspaceSpace（mode=1，对齐
-// R13+ classify 的图纸空间语义），不进模型空间列表。type 高位（≥0x80）
-// 为「已删除并入块」标记，&0x7F 后照常解码。
+// parsePreR13Entities 逐条解析主实体区或附加实体区的记录。
+// 下一条记录按当前记录起点加声明长度定位，避免字段读取位置影响后续记录。
+// HAS_PSPACE 实体写入 PspaceSpace，不加入模型空间；类型高位由解析
+// 分支处理，实际类型使用低七位。
 func parsePreR13Entities(doc *Document, agg *preR13EntityAgg, data []byte, start, end uint32, ver container.DwgVersion, blockHeaders []preR13BlockHeader, codepage uint16) {
 	if start == 0 || end <= start || int(end) > len(data) {
 		return
@@ -887,8 +889,8 @@ func preR13DimPt(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion) ent
 // DecodePreR13Dimension DIMENSION（decode.c decode_preR13_DIMENSION）：
 // 公共字段为匿名块句柄 RS + def_pt + text_midpt 2RD + [clone_ins_pt] +
 // [flag RC] + [user_text TV]，再按 flag 低 4 位分派七种类型专属布局；
-// 类型决定 typeName（gold entity 键），几何字段映射 R13+ 的
-// entDimension 模型（point13/14/15/10、p16、textRotation 等），
+// 类型决定 typeName（参考 JSON entity 键），几何字段映射 R13+ 的
+// EntDimension 模型（point13/14/15/10、p16、textRotation 等），
 // dimstyle 为 2 字节 DIMSTYLE 表索引。
 func DecodePreR13Dimension(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion, codepage uint16) *entity.EntDimension {
 	e := &entity.EntDimension{}
@@ -1112,7 +1114,7 @@ func preR13PlineFlagOffset(data []byte, ver container.DwgVersion) int {
 // DecodePreR13Polyline POLYLINE（type 19，pre-R13 单类型多变体）：先预扫描
 // pline_flag 决定变体（3D/MESH/PFACE/2D），再按公共头（spec 顺序）展开后
 // 读各变体专有字段。opts 位在各变体间语义不同（dwg.spec 各 PRE(R_13b1)
-// 分支），已删除实体（type 高位置位）同规则处理。
+// 分支），已删除实体（type 高位置位）采用相同规则处理。
 func DecodePreR13Polyline(data []byte, h PreR13EntHead, ver container.DwgVersion) any {
 	flagOff := preR13PlineFlagOffset(data[h.StartOff:], ver)
 	plineFlag := uint8(0)
@@ -1181,10 +1183,10 @@ func DecodePreR13Polyline(data []byte, h PreR13EntHead, ver container.DwgVersion
 			_ = r.rc() // flag
 		}
 		if opts&PreR13OptsPolylineHasMVerts != 0 {
-			e.NumVertices = int(r.rs()) // numverts（gold 键 71）
+			e.NumVertices = int(r.rs()) // numverts（参考字段 71）
 		}
 		if opts&PreR13OptsPolylineHasNVerts != 0 {
-			e.NumFaces = int(r.rs()) // numfaces（gold 键 72）
+			e.NumFaces = int(r.rs()) // numfaces（参考字段 72）
 		}
 		e.TypeCode = PreR13TypePolyline
 		e.Mode = 2
@@ -1423,7 +1425,7 @@ func decodePreR13Shape(r *PreR13Reader, h PreR13EntHead) *entity.EntShape {
 	e.Scale = r.rd()
 	e.ShapeNo = uint16(r.rc()) // style_id：SHAPEFILE 内形编号（1 字节表索引）
 	if h.Opts&0x01 != 0 {
-		e.Rotation = r.rd() // rotation（弧度，gold 0.5236 = 30°）
+		e.Rotation = r.rd() // rotation，单位为弧度。
 	}
 	if h.Opts&0x02 != 0 {
 		_ = r.rc() // style（HAS_LOAD_NUM，1 字节 STYLE 表索引）
@@ -1475,7 +1477,7 @@ func decodePreR13Line(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion
 // decodePreR133DLine 3DLINE（dwg.spec _3DLINE）：R9（R_2_4~R_9c1）以 opts
 // 位逐点选择 3RD（bit0 起点、bit1 终点）否则 2RD（z=elevation）；R10+ 以
 // HAS_ELEVATION 位区分（置位 2RD×2、否则 3RD×2），opts bit0 为挤出方向。
-// 复用 entLine 模型（R13+ 渲染直连）。
+// 复用 EntLine 模型（R13+ 渲染直连）。
 func decodePreR133DLine(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion) *entity.EntLine {
 	e := &entity.EntLine{}
 	e.TypeName = "3DLINE"
@@ -1513,7 +1515,7 @@ func decodePreR133DLine(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersi
 // decodePreR133DFace 3DFACE（dwg.spec _3DFACE）：R9 以 opts 四个位逐角点
 // 选择 3RD（bit0~bit3 对应角 1~4）否则 2RD（z=elevation）；R10+ 以
 // HAS_ELEVATION 位区分 2RD×4/3RD×4，opts bit0 为不可见边标志 RS。
-// 复用 entFace3d 模型（R13+ 渲染直连）。
+// 复用 EntFace3d 模型（R13+ 渲染直连）。
 func decodePreR133DFace(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion) *entity.EntFace3d {
 	e := &entity.EntFace3d{}
 	e.TypeName = "3DFACE"
@@ -1564,7 +1566,7 @@ func decodePreR13Point(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersio
 		r.skip(24) // extrusion 3RD
 	}
 	if h.Opts&0x02 != 0 {
-		e.Rotation = r.rd() // x_ang（弧度，pre-R13 角度字段与 R13+ 同为弧度口径）
+		e.Rotation = r.rd() // x_ang，单位为弧度。
 	}
 	return e
 }
@@ -1599,7 +1601,7 @@ func decodePreR13Arc(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersion)
 	preR13Color(&e.BaseEntity, h)
 	cx, cy := r.rd(), r.rd()
 	e.Radius = r.rd()
-	// pre-R13 角度字段即弧度（gold start=4.712=270°），与 R13+ 口径一致
+	// 源角度字段使用弧度，直接保留到公共实体模型。
 	e.AngleStart = r.rd()
 	e.AngleEnd = r.rd()
 	e.Center = entity.Point3{X: cx, Y: cy, Z: preR13Z(h)}
@@ -1633,7 +1635,7 @@ func decodePreR13Text(r *PreR13Reader, h PreR13EntHead, codepage uint16) *entity
 		r.skip(n)
 	}
 	if h.Opts&0x01 != 0 {
-		e.Rotation = r.rd() // rotation（弧度口径）
+		e.Rotation = r.rd() // rotation，单位为弧度。
 	}
 	if h.Opts&0x02 != 0 {
 		_ = r.rd() // width_factor
@@ -1679,8 +1681,8 @@ func preR13TV(r *PreR13Reader, codepage uint16) string {
 // decodePreR13Attrib ATTRIB/ATTDEF（dwg.spec PRE(R_13b1) 分支）：插入点 2RD +
 // 字高 RD + 文字 TV + [ATTDEF 提示 TV] + 标签 TV + flags RC，opts 位展开
 // 旋转/宽度因子/倾斜角/样式/生成标志/水平对齐/对齐点/挤出/垂直对齐。
-// ATTDEF 的文字为 default_value（gold default_value 键），ATTRIB 为
-// text_value；插入点 z 取公共头 elevation（同 TEXT 口径）。
+// ATTDEF 的文字为 default_value（参考 JSON default_value 键），ATTRIB 为
+// text_value；插入点 z 取公共头 elevation（同 TEXT 规则）。
 func decodePreR13Attrib(r *PreR13Reader, h PreR13EntHead, attdef bool, codepage uint16) *entity.EntAttrib {
 	e := &entity.EntAttrib{}
 	if attdef {
@@ -1783,7 +1785,7 @@ func decodePreR13Insert(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersi
 		e.Scale.Y = r.rd()
 	}
 	if h.Opts&0x04 != 0 {
-		e.Rotation = r.rd() // 弧度（gold 0.5236 = 30°）
+		e.Rotation = r.rd() // 角度单位为弧度。
 	}
 	if h.Opts&0x08 != 0 {
 		e.Scale.Z = r.rd()
@@ -1806,8 +1808,8 @@ func decodePreR13Insert(r *PreR13Reader, h PreR13EntHead, ver container.DwgVersi
 	return e
 }
 
-// preR13HandleBase pre-R13 实体无全局句柄流：HAS_HANDLING 显式句柄优先，
-// 否则以记录偏移作稳定伪句柄（同一次解析内唯一，满足 entityByHandle 归档）。
+// preR13HandleBase 确定 R13 之前版本实体的归档句柄。
+// 优先使用 HAS_HANDLING 指定的显式句柄，否则使用记录偏移生成伪句柄。
 func preR13HandleBase(base *entity.BaseEntity, h PreR13EntHead) {
 	if h.Handle != 0 {
 		base.Handle = uint64(h.Handle)

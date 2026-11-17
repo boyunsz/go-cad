@@ -1,9 +1,11 @@
-// entities_mpolygon.go 实现 MPOLYGON（AcDbMPolygon，多边形填充，动态类）：
-// 主体复用 HATCH 的渐变填充段与边界路径解析（decodeHatchGradient/
-// decodeHatchPaths），外围为 style/图案段/hatch_color/x_dir 等 MPOLYGON
-// 专属字段。位级布局对照 LibreDWG dwg.spec DWG_ENTITY (MPOLYGON)
-// （DEBUG_CLASSES 分支；上游正常解码器不编译该类，语料中亦无实例，
-// 位流经合成流测试验证）。
+// 本文件解析动态类 MPOLYGON 多边形填充实体。
+//
+// 渐变参数和边界路径复用 HATCH 解析函数；样式、图案、填充颜色及方向
+// 等专用字段单独读取。合成位流测试用于验证字段布局，不能替代真实
+// 图纸的兼容性验证。
+//
+// 格式参考：LibreDWG dwg.spec 中的 MPOLYGON 定义。
+
 package entity
 
 import (
@@ -32,7 +34,7 @@ func decodeMpolygonVer(r *bitstream.BitStream, Head *CommonEntityHead, ver conta
 	m := &EntMpolygon{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}
 	h := &EntHatch{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}
 	m.Hatch = h
-	streamName := ver >= container.VerR2007 // R2007+ 图案名/渐变名存于对象字符串区（同 HATCH 口径）
+	streamName := ver >= container.VerR2007 // R2007+ 图案名/渐变名存于对象字符串区（同 HATCH 规则）
 	var err error
 	if m.Style, err = r.ReadBS(); err != nil {
 		return nil, err
@@ -124,7 +126,7 @@ func decodeMpolygonVer(r *bitstream.BitStream, Head *CommonEntityHead, ver conta
 			h.Deflines = append(h.Deflines, dl)
 		}
 	}
-	// hatch_color CMC（R2004+ 布局）：当前审计口径不保留颜色值，读取占位推进位流
+	// hatch_color CMC（R2004+ 布局）：当前审计规则不保留颜色值，读取占位推进位流
 	if ver != container.VerR13 && ver != container.VerR14 {
 		if err = SkipColorCMCR2004(r); err != nil {
 			return nil, err

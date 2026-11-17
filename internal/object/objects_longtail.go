@@ -1,9 +1,9 @@
-// 本文件实现四个语料 0 实例的内部对象解码器（dwg.spec 的 DWG_OBJECT 宏
-// 字段定义）：IDBUFFER（AcDbIdBuffer 句柄缓冲）、INDEX/LAYER_INDEX
-// （AcDbIndex 家族，TIMEBLL 时间戳 + 图层索引条目）、PROXY_OBJECT
-// （ACAD 代理对象，参照 PROXY_ENTITY 的元数据 + 原始数据位捕获模式）。
-// 语料中无真实实例，字段布局按 spec 与 LibreDWG decode 行为对齐，经合成
-// 位流单测自证（objects_longtail_test.go），真实样本出现后需以 gold 对照。
+// 本文件解析 IDBUFFER、INDEX、LAYER_INDEX 和 PROXY_OBJECT。
+//
+// 解析内容包括句柄缓冲、索引时间戳、图层索引项及代理对象数据。
+// 字段布局依据格式定义实现；合成位流验证不代表真实图纸兼容性已充分覆盖。
+//
+// 格式参考：LibreDWG dwg.spec 中对应的对象定义。
 
 package object
 
@@ -34,7 +34,7 @@ func decodeGenericIDBUFFER(R *bitstream.BitStream, Ver container.DwgVersion, fr 
 }
 
 // readTimeBLLFields 读 FIELD_TIMEBLL（R13+ 布局：BL days + BL ms），
-// 以 gold JSON 的 [days, ms] 数组形状记录。
+// 以 参考 JSON 的 [days, ms] 数组形状记录。
 func readTimeBLLFields(R *bitstream.BitStream, key string, g *ObjGeneric) error {
 	days, err := R.ReadBL()
 	if err != nil {

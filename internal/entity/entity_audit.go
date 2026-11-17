@@ -1,8 +1,8 @@
-// entity_audit.go 实体审计支持：字段导出器（对照 dwgread -O JSON 的
-// gold 标量键）与实体句柄索引。键名与 LibreDWG JSON 输出一致
-// （entity/bitsize/size/entmode/color/ltype_scale/linewt/z_is_zero/
-// thickness/start/end/extrusion 等），供 TestAlignmentAudit 扩展后
-// 对实体做与内部对象同口径的值级审计。
+// 本文件提供实体字段的诊断导出与值比较工具。
+//
+// 字段访问器将实体数据映射为 LibreDWG JSON 使用的字段名称，包含标量、
+// 数组、嵌套结构及句柄信息。比较工具供字段级回归验证使用。
+
 package entity
 
 import (
@@ -12,8 +12,8 @@ import (
 	"strings"
 )
 
-// EntityField 实体字段导出器：按 gold JSON 键名返回实体字段值。
-// 公共键（所有实体共享，出自 commonEntityHead/baseEntity）：
+// EntityField 实体字段导出器：按 参考 JSON 键名返回实体字段值。
+// 公共键（所有实体共享，出自 CommonEntityHead/BaseEntity）：
 // handle/bitsize/size/entmode/color/ltype_scale/ltype_flags/
 // plotstyle_flags/invisible/linewt；per-type 几何键按类型分发。
 // 未建模键返回 nil（审计侧按缺失处理）。
@@ -24,17 +24,17 @@ func EntityField(ent any, key string) any {
 	}
 	b := ec.Common()
 	hd := b.Head
-	// DIMENSION 的 gold entity 键是全名（DIMENSION_LINEAR 等），内部短名
+	// DIMENSION 的 参考 JSON entity 键是全名（DIMENSION_LINEAR 等），内部短名
 	// （DIM_LINEAR）需在此映射；公共 case 返回原始 typeName 不适用。
 	if _, ok := ent.(*EntDimension); ok && key == "entity" {
 		return DimGoldEntityName(b.TypeName)
 	}
-	// UNKNOWN_ENT 兜底实体的 gold entity 键强制 UNKNOWN_ENT（b.typeName
-	// 保留原始动态类名如 ACAD_TABLE，fillMeta 覆盖后无法直接输出兜底名）。
+	// UNKNOWN_ENT 回退实体的 参考 JSON entity 键强制 UNKNOWN_ENT（b.typeName
+	// 保留原始动态类名如 ACAD_TABLE，fillMeta 覆盖后无法直接输出回退名）。
 	if _, ok := ent.(*EntUnknownEnt); ok && key == "entity" {
 		return "UNKNOWN_ENT"
 	}
-	// LIGHT 的 spec 自带 type 字段（70 组码）在 gold JSON 中覆盖顶层类型码键
+	// LIGHT 的 spec 自带 type 字段（70 组码）在 参考 JSON 中覆盖顶层类型码键
 	// （out_json 顶层先输出 type，专有字段同名后写覆盖），故 type 键返回
 	// 光类型值而非流内类型码；MULTILEADER 同理（BS 170 的 type 字段）。
 	if l, ok := ent.(*EntLight); ok && key == "type" {
@@ -43,7 +43,7 @@ func EntityField(ent any, key string) any {
 	if m, ok := ent.(*EntMLeader); ok && key == "type" {
 		return int64(m.MleaderType)
 	}
-	// OLE2FRAME 实体内 BS type 与公共实体 type 同名，gold JSON 重复键
+	// OLE2FRAME 实体内 BS type 与公共实体 type 同名，参考 JSON 重复键
 	// 后写覆盖为实体内的 type 值（如 2=Embedded）
 	if o, ok := ent.(*EntOle2Frame); ok && key == "type" {
 		return int64(o.OleType)
@@ -59,18 +59,18 @@ func EntityField(ent any, key string) any {
 	case "color":
 		return colorAuditValue(b.Color)
 	case "color.index":
-		// gold color 为嵌套对象时（R2007+ CMC）展平出 color.index 等子键；
-		// gold 仅在 index 非 0 时输出该键，index=0（ByBlock）返回 nil
+		// 参考 JSON color 为嵌套对象时（R2007+ CMC）展平出 color.index 等子键；
+		// 参考 JSON 仅在 index 非 0 时输出该键，index=0（ByBlock）返回 nil
 		if b.Color.HasIndex && b.Color.Index != 0 {
 			return int64(b.Color.Index)
 		}
 		return nil
 	case "color.rgb":
-		// gold 的 rgb 为 %06x 完整值（LibreDWG 不截断：32 位值含首字节
+		// 参考 JSON 的 rgb 为 %06x 完整值（LibreDWG 不截断：32 位值含首字节
 		// 索引/alpha 时输出 8 位 hex，纯 24 位时 6 位）
 		return fmt.Sprintf("%06x", b.Color.TrueColor)
 	case "color.flag":
-		// gold 仅在 flag 非 0 时输出该键
+		// 参考 JSON 仅在 flag 非 0 时输出该键
 		if b.Color.Flag != 0 {
 			return int64(b.Color.Flag)
 		}
@@ -96,7 +96,7 @@ func EntityField(ent any, key string) any {
 		return float64(b.RecSize)
 	case "entity":
 		if b.TypeName != "" {
-			// gold 对标注类实体输出 DIMENSION_ 前缀（内部类型名为 DIM_*）
+			// 参考 JSON 对标注类实体输出 DIMENSION_ 前缀（内部类型名为 DIM_*）
 			if strings.HasPrefix(b.TypeName, "DIM_") {
 				return "DIMENSION_" + b.TypeName[4:]
 			}
@@ -104,7 +104,7 @@ func EntityField(ent any, key string) any {
 		}
 		return nil
 	case "type":
-		// gold 的 type 键是数字类号（如 LINE=19），类名字符串只通过 entity 键导出
+		// 参考 JSON 的 type 键是数字类号（如 LINE=19），类名字符串只通过 entity 键导出
 		if b.TypeCode > 0 {
 			return int64(b.TypeCode)
 		}
@@ -158,7 +158,7 @@ func EntityField(ent any, key string) any {
 			return B2int(hd.XdicMissing)
 		case "has_ds_data":
 			return B2int(hd.HasDsBinary)
-		// 公共 handle 流次级句柄（批次 B 建模；gold 句柄为 0 时不输出键）
+		// 导出公共句柄流中的辅助引用；零句柄不输出。
 		case "ownerhandle":
 			if b.Owner != 0 {
 				return b.Owner
@@ -201,13 +201,11 @@ func EntityField(ent any, key string) any {
 		switch key {
 		case "entity":
 			return DimGoldEntityName(b.TypeName)
-		// 公共点组与句柄系（批次 B 补齐；ORDINATE 专属点组为
-		// def_pt(10)/feature_location_pt(13)/leader_endpt(14)，与
-		// readDimSpecific 的 dimLayoutOrdinate 布局一一对应）
+		// 导出标注点和句柄引用。ORDINATE 使用 def_pt、feature_location_pt
+		// 和 leader_endpt，对应 Point10、Point13 和 Point14。
 		case "def_pt":
-			// def_pt（10 组码）：ARC_DIMENSION 的专用 defPt 优先（与
-			// point10 同源）；ANG2LN 为 2RD 形态（p16x/p16y，R13~R2018
-			// trace 实证 clone_ins_pt 后紧跟 def_pt 2RD）
+			// def_pt 优先使用 ARC_DIMENSION 的专用定义点；ANG2LN 使用
+			// Point16x 和 P16y 保存的二维定义点。
 			if b.TypeName == "DIM_ANG2LN" {
 				return []float64{d.Point16x, d.P16y}
 			}
@@ -257,13 +255,13 @@ func EntityField(ent any, key string) any {
 			return nil
 		case "clone_ins_pt":
 			// clone_ins_pt（2RD，全维度族公共）：解码侧存入 insertPoint 的
-			// x/y（gold 形态为二元组）
+			// x/y（参考 JSON 形态为二元组）
 			if d.HasInsertPoint {
 				return []float64{d.InsertPoint.X, d.InsertPoint.Y}
 			}
 			return nil
 		case "center_pt":
-			// ARC_DIMENSION 中心点（15 组码，dimLayoutArc 第三点）
+			// ARC_DIMENSION 中心点（15 组码，DimLayoutArc 第三点）
 			if b.TypeName == "ARC_DIMENSION" {
 				return point3Arr(d.Point15)
 			}
@@ -367,7 +365,7 @@ func EntityField(ent any, key string) any {
 		case "location":
 			return point3Arr(e.Location)
 		case "rotation", "x_ang":
-			// gold 的 x_ang 即 x 轴角度（解码侧 rotation）
+			// 参考 JSON 的 x_ang 即 x 轴角度（解码侧 rotation）
 			return e.Rotation
 		case "x":
 			return e.Location.X
@@ -381,12 +379,12 @@ func EntityField(ent any, key string) any {
 		case "center":
 			return point3Arr(e.Center)
 		case "major_axis", "sm_axis":
-			// gold 键名 sm_axis（本库自有口径 major_axis 双键导出）
+			// 同时提供参考字段 sm_axis 和本库字段 major_axis。
 			return Vec3Arr(e.MajorAxis)
 		case "extrusion":
 			return Vec3Arr(e.Extrusion)
 		case "ratio", "axis_ratio":
-			// gold 键名为 axis_ratio（流内 BD 40 原值，无倒数换算）
+			// 参考字段名为 axis_ratio（流内 BD 40 原值，无倒数换算）
 			return e.Ratio
 		case "start_angle":
 			return e.StartAng
@@ -395,7 +393,7 @@ func EntityField(ent any, key string) any {
 		}
 	case *EntLwPolyline:
 		if idx, rest, ok := auditArrayIndex(key, "widths"); ok {
-			// gold 的 widths 为 {start,end} 对象数组，展平出 widths[i].start/end
+			// 参考 JSON 的 widths 为 {start,end} 对象数组，展平出 widths[i].start/end
 			if idx >= 0 && idx < len(e.Widths) {
 				switch rest {
 				case "start":
@@ -408,10 +406,10 @@ func EntityField(ent any, key string) any {
 		}
 		switch key {
 		case "flags", "flag":
-			// gold 的 LWPOLYLINE 标志键名为 flag
+			// 参考 JSON 的 LWPOLYLINE 标志键名为 flag
 			return int64(e.Flags)
 		case "elevation":
-			// flag&8 时输出标高；无标志段 gold 也不输出该键（返回 0 不参与）
+			// flag&8 时输出标高；无标志段 参考 JSON 也不输出该键（返回 0 不参与）
 			return e.Elevation
 		case "const_width":
 			// flag&4 时的常量宽度（同 elevation 模式）
@@ -420,32 +418,32 @@ func EntityField(ent any, key string) any {
 			// flag&2 时的厚度（同 elevation 模式）
 			return e.Thickness
 		case "vertices", "points":
-			// gold 键名 points（展平 [[x,y],...] 嵌套形态由测试侧展开）
+			// 参考字段名 points（展平 [[x,y],...] 嵌套形态由测试侧展开）
 			return Pt2Arr(e.Vertices)
 		case "bulges":
 			return F64Arr(e.Bulges)
 		case "vertexids":
-			return nil // gold 顶点索引数组（本库未建模）
+			return nil // 参考 JSON 顶点索引数组（本库未建模）
 		case "widths":
 			return nil
 		}
 	case *EntText:
 		switch key {
 		case "text", "text_value":
-			// gold 的 text_value 即显示文本
+			// 参考 JSON 的 text_value 即显示文本
 			return e.Text
 		case "insertion", "ins_pt":
-			// gold 的 ins_pt 即插入点
+			// 参考 JSON 的 ins_pt 即插入点
 			return point3Arr(e.Insertion)
 		case "height":
 			return e.Height
 		case "rotation":
 			return e.Rotation
 		case "h_align", "horiz_alignment":
-			// gold 的 horiz_alignment 即水平对齐（解码侧 hAlign）
+			// 参考 JSON 的 horiz_alignment 即水平对齐（解码侧 hAlign）
 			return int64(e.HAlign)
 		case "v_align", "vert_alignment":
-			// gold 的 vert_alignment 即垂直对齐（解码侧 vAlign）
+			// 参考 JSON 的 vert_alignment 即垂直对齐（解码侧 vAlign）
 			return int64(e.VAlign)
 		case "generation":
 			return int64(e.Gen)
@@ -457,7 +455,7 @@ func EntityField(ent any, key string) any {
 		case "extrusion":
 			return Vec3Arr(e.Extrusion)
 		case "style":
-			// 文本样式句柄（handle 流专有段首项；gold 句柄为 0 时不输出键）
+			// 文本样式句柄（handle 流专有段首项；参考 JSON 句柄为 0 时不输出键）
 			if e.StyleHandle != 0 {
 				return e.StyleHandle
 			}
@@ -466,7 +464,7 @@ func EntityField(ent any, key string) any {
 	case *EntMText:
 		switch key {
 		case "insertion", "ins_pt":
-			// gold 的 ins_pt 即插入点
+			// 参考 JSON 的 ins_pt 即插入点
 			return point3Arr(e.Insertion)
 		case "x_axis_dir":
 			return Vec3Arr(e.XAxisDir)
@@ -479,19 +477,19 @@ func EntityField(ent any, key string) any {
 		case "extrusion":
 			return Vec3Arr(e.Extrusion)
 		case "style":
-			// 文本样式句柄（handle 流专有段；gold 句柄为 0 时不输出键）
+			// 文本样式句柄（handle 流专有段；参考 JSON 句柄为 0 时不输出键）
 			if e.StyleHandle != 0 {
 				return e.StyleHandle
 			}
 			return nil
 		case "text":
-			// gold 输出经 bit_TV_to_utf8 的 \U+XXXX 展开（AutoCAD 内联转义）
+			// 参考 JSON 输出经 bit_TV_to_utf8 的 \U+XXXX 展开（AutoCAD 内联转义）
 			return expandUnicodeEscapes(e.Text)
 		}
 	case *EntInsert:
 		switch key {
 		case "insertion", "position", "ins_pt":
-			// gold 的 ins_pt 即插入点
+			// 参考 JSON 的 ins_pt 即插入点
 			return point3Arr(e.Position)
 		case "scale":
 			return Vec3Arr(e.Scale)
@@ -542,7 +540,7 @@ func EntityField(ent any, key string) any {
 			// ATTDEF 的 default_value 与 ATTRIB 的 text_value 同为显示文本
 			return e.Text
 		case "prompt":
-			// gold 仅 ATTDEF 有 prompt 键；ATTRIB 返回 nil 不比对
+			// 参考 JSON 仅 ATTDEF 有 prompt 键；ATTRIB 返回 nil 不比对
 			if b.TypeCode == 0x03 {
 				return e.Prompt
 			}
@@ -569,7 +567,7 @@ func EntityField(ent any, key string) any {
 		case "extrusion":
 			return Vec3Arr(e.Extrusion)
 		case "style":
-			// 文本样式句柄（handle 流专有段首项；gold 句柄为 0 时不输出键）
+			// 文本样式句柄（handle 流专有段首项；参考 JSON 句柄为 0 时不输出键）
 			if e.StyleHandle != 0 {
 				return e.StyleHandle
 			}
@@ -584,7 +582,7 @@ func EntityField(ent any, key string) any {
 		case "flag":
 			return int64(e.Flags)
 		case "id":
-			// R2010+ 顶点标识符（BL0 spec 字段）；pre-R2010 样本 gold
+			// R2010+ 顶点标识符（BL0 spec 字段）；pre-R2010 样本 参考 JSON
 			// 无 id 键，不会查询此 case
 			return e.id
 		case "tangent_dir":
@@ -611,7 +609,7 @@ func EntityField(ent any, key string) any {
 	case *EntVertexPfaceFace:
 		switch key {
 		case "flag":
-			// flag 恒为 128，不从流读取（gold 同值输出）
+			// flag 恒为 128，不从流读取（参考 JSON 同值输出）
 			return int64(e.Flag)
 		case "vertind":
 			return []float64{float64(e.Vertind[0]), float64(e.Vertind[1]), float64(e.Vertind[2]), float64(e.Vertind[3])}
@@ -724,7 +722,7 @@ func EntityField(ent any, key string) any {
 	case *EntBlockLike:
 		switch key {
 		case "name":
-			// gold 仅 BLOCK 有 name 键（ENDBLK/SEQEND 无该键，返回 nil 不比对）
+			// 参考 JSON 仅 BLOCK 有 name 键（ENDBLK/SEQEND 无该键，返回 nil 不比对）
 			if e.Name != "" {
 				return e.Name
 			}
@@ -782,9 +780,8 @@ func EntityField(ent any, key string) any {
 			}
 			return nil
 		}
-		// 展平嵌套键：verts[i].vertex/vertex_direction/miter_direction 与
-		// verts[i].lines[j].segparms/areafillparms（批次 B：按每线计数从
-		// 扁平参数数组切片；DXF 来源无分组计数，返回 nil）
+		// 导出多线顶点及样式线参数的展平字段。
+		// 按已保存的分组计数切分参数数组；缺少计数时返回 nil。
 		if idx, rest, ok := auditArrayIndex(key, "verts"); ok {
 			if idx < 0 || idx >= len(e.Vertices) {
 				return nil
@@ -820,8 +817,7 @@ func EntityField(ent any, key string) any {
 			return int64(e.NDensity)
 		}
 	case *EntSpline:
-		// SPLINE 审计键（批次 B 补齐：主体标量 + 点/数组键；R2013+ 的
-		// splineflags/knotparam 为位域合成口径，未导出）
+		// 导出 SPLINE 的标量、点和数组字段；未单独导出 splineflags 和 knotparam。
 		switch key {
 		case "scenario":
 			return int64(e.Scenario)
@@ -863,7 +859,7 @@ func EntityField(ent any, key string) any {
 			return nil
 		}
 		if key == "style" {
-			// 样式句柄（handle 流，批次 B 建模）
+			// 导出文字样式句柄。
 			if e.StyleHandle != 0 {
 				return e.StyleHandle
 			}
@@ -1070,7 +1066,7 @@ func mlineLineParams(params []float64, counts []int, li int) []float64 {
 	return params[Start:End]
 }
 
-// DimGoldEntityName 内部 DIM 短名映射为 gold JSON 的 DIMENSION 全名；
+// DimGoldEntityName 内部 DIM 短名映射为 参考 JSON 的 DIMENSION 全名；
 // 非 DIMENSION 类型原样返回。
 func DimGoldEntityName(Name string) string {
 	const short = "DIM_"
@@ -1081,7 +1077,7 @@ func DimGoldEntityName(Name string) string {
 }
 
 // mleaderCMCAuditValue CMC 键值导出（对齐 out_json field_cmc）：
-// pre-R2004 gold 为标量索引数字（key 键本身），R2004+ 为对象展平子键
+// pre-R2004 参考 JSON 为标量索引数字（key 键本身），R2004+ 为对象展平子键
 // ——index 仅反查结果非 0 时输出、rgb 恒为完整 32 位 %06x、flag 非 0 才输出。
 func mleaderCMCAuditValue(c MleaderCMC, key string, scalarKey, prefix string) any {
 	if !c.IsTrue {
@@ -1106,8 +1102,8 @@ func mleaderCMCAuditValue(c MleaderCMC, key string, scalarKey, prefix string) an
 }
 
 // mleaderAuditField MULTILEADER 审计键导出：顶层标量键 + ctx.* 展平键
-// （ctx.leaders[i]…/ctx.leaders[i].lines[j]…，与 gold JSON 展平口径一致）。
-// 点/数组键（content_base、points、breaks、block_scale 等 gold 数组形态）
+// （ctx.leaders[i]…/ctx.leaders[i].lines[j]…，与 参考 JSON 展平规则一致）。
+// 点/数组键（content_base、points、breaks、block_scale 等 参考 JSON 数组形态）
 // 不参与比对，统一返回 nil。
 func mleaderAuditField(m *EntMLeader, key string) any {
 	switch key {
@@ -1161,7 +1157,7 @@ func mleaderAuditField(m *EntMLeader, key string) any {
 	case "attach_bottom":
 		return int64(m.AttachBottom)
 	case "is_text_extended":
-		if m.HasVersion { // R2013b+ 键；gold 仅 R2013/2018 出现
+		if m.HasVersion { // R2013b+ 键；参考 JSON 仅 R2013/2018 出现
 			return B2int(m.IsTextExtended)
 		}
 		return nil
@@ -1175,7 +1171,7 @@ func mleaderAuditField(m *EntMLeader, key string) any {
 			return v
 		}
 	}
-	// 句柄系（批次 B 补齐：gold 句柄为 0 时不输出键）
+	// 导出句柄引用；零句柄不输出。
 	switch key {
 	case "mleaderstyle":
 		if m.MleaderStyle != 0 {
@@ -1250,7 +1246,7 @@ func mleaderCtxAuditField(m *EntMLeader, key string) (any, bool) {
 			return int64(c.TextBottom), true
 		}
 		return nil, true
-	// ctx 点组（批次 B 补齐数组导出）
+	// 导出上下文坐标数组。
 	case "ctx.base":
 		return point3Arr(c.Base), true
 	case "ctx.base_dir":
@@ -1299,7 +1295,7 @@ func mleaderCtxAuditField(m *EntMLeader, key string) (any, bool) {
 		case "rotation":
 			return b.Rotation, true
 		case "color.rgb":
-			// CMC rgb 完整 32 位（对齐 gold %08x/%06x 双形态）
+			// CMC rgb 完整 32 位（对齐 参考 JSON %08x/%06x 双形态）
 			return fmt.Sprintf("%06x", b.Color.Rgb), true
 		case "color.index":
 			return int64(b.Color.Index), true
@@ -1307,7 +1303,7 @@ func mleaderCtxAuditField(m *EntMLeader, key string) (any, bool) {
 		// normal/location/scale/transform 为数组键，block_table 为句柄键
 		return nil, true
 	}
-	// blocklabels[i].*（R14-R2007 块标签数组，multileaders 真实样本实证）
+	// blocklabels[i].* 对应 R14–R2007 的块标签数组。
 	if idx, rest, ok := auditArrayIndex(key, "blocklabels"); ok {
 		if idx < 0 || idx >= len(m.Blocklabels) {
 			return nil, true
@@ -1457,8 +1453,8 @@ func mleaderTxtAuditField(t *mleaderTxtContent, rest string) any {
 }
 
 // lightAuditField LIGHT 审计键导出：基线标量键 + light_color CMC 子键。
-// light_color 双形态：pre-R2004 gold 为标量索引数字（light_color 键），
-// R2004+ gold 为对象展平出的 light_color.index/.rgb/.flag 子键——
+// light_color 双形态：pre-R2004 参考 JSON 为标量索引数字（light_color 键），
+// R2004+ 参考 JSON 为对象展平出的 light_color.index/.rgb/.flag 子键——
 // out_json 的 index 键仅在反查结果非 0 时输出，rgb 恒为完整 32 位
 // rgb（含 method 高字节）的 %06x 形态，flag 仅非 0 时输出。
 func lightAuditField(l *EntLight, key string) any {
@@ -1541,9 +1537,9 @@ func acisAuditField(a *EntAcis, key string) any {
 	case "isoline_present":
 		return B2int(a.IsolinePresent)
 	case "num_wires", "num_silhouettes":
-		return nil // 仅 isoline_present=1 时写入 gold，数组宿主键无对照价值
+		return nil // 仅 isoline_present=1 时写入 参考 JSON，数组宿主键无对照价值
 	case "history_id":
-		// history_id 句柄（R2004+ handle 流公共序后首项）：gold 非空为
+		// history_id 句柄（R2004+ handle 流公共序后首项）：参考 JSON 非空为
 		// [code,size,abs,abs] 句柄数组、NULL 为 [0,0] 二元数组，导出侧
 		// 按同构形态输出（非空→句柄数字，NULL→[0,0]；R13/R14 无该键
 		// 不对照，输出 [0,0] 无影响）
@@ -1690,7 +1686,7 @@ func wipeoutAuditField(w *EntWipeout, key string) any {
 
 // imageAuditField IMAGE 审计键导出（与 WIPEOUT 同布局，标量键同集合；
 // pt0/uvec/vvec/image_size/clip_verts/imagedef 为数组或句柄键，
-// gold 展平口径不进入标量对照）。
+// 参考 JSON 展平规则不进入标量对照）。
 func imageAuditField(img *EntImage, key string) any {
 	switch key {
 	case "class_version":
@@ -1737,7 +1733,7 @@ func imageAuditField(img *EntImage, key string) any {
 	return nil
 }
 
-// Ole2FrameAuditField OLE2FRAME 审计键导出（gold 标量键 mode/type；
+// Ole2FrameAuditField OLE2FRAME 审计键导出（参考标量键 mode/type；
 // data 为超长 hex 字符串，由对照测试直接断言，此处不重复导出）。
 func Ole2FrameAuditField(o *EntOle2Frame, key string) any {
 	switch key {
@@ -1766,7 +1762,7 @@ func OleFrameAuditField(o *EntOleFrame, key string) any {
 	return nil
 }
 
-// ProxyEntityAuditField PROXY_ENTITY 审计键导出（gold 标量键口径；
+// ProxyEntityAuditField PROXY_ENTITY 审计键导出（参考标量键规则；
 // proxy_data/data/objids 为数组键不进入标量对照，data_numbits 为
 // LibreDWG DXF/JSON 导出键）。
 func ProxyEntityAuditField(P *EntProxyEntity, key string) any {
@@ -1817,8 +1813,8 @@ func MpolygonAuditField(m *EntMpolygon, key string) any {
 
 // hatchAuditField HATCH 审计键导出：主体标量键 + 路径/定义线的
 // 展平嵌套键（paths[i].flag、paths[i].segs[j].curve_type、
-// paths[i].polyline_paths[k].bulge、deflines[m].angle 等，与 gold
-// JSON 展平口径一致）。数组键（knots/points/dashes 等）返回 nil，
+// paths[i].polyline_paths[k].bulge、deflines[m].angle 等，与 参考 JSON
+// JSON 展平规则一致）。数组键（knots/points/dashes 等）返回 nil，
 // 由审计侧按非标量跳过。
 func hatchAuditField(h *EntHatch, key string) any {
 	switch key {
@@ -1862,9 +1858,9 @@ func hatchAuditField(h *EntHatch, key string) any {
 		if h.HasDerived {
 			return h.PixelSize
 		}
-		return nil // gold 仅 has_derived=1 时输出
+		return nil // 参考 JSON 仅 has_derived=1 时输出
 	case "seeds":
-		// 种子点数组（gold 形态 [[x,y],...]，2RD 对）
+		// 种子点数组（参考 JSON 形态 [[x,y],...]，2RD 对）
 		out := make([][]float64, 0, len(h.Seeds))
 		for _, s := range h.Seeds {
 			out = append(out, []float64{s.X, s.Y})
@@ -1927,7 +1923,7 @@ func HatchPathAuditField(P *HatchPath, rest string) any {
 	case "segs", "polyline_paths":
 		return nil // 数组本身
 	case "boundary_handles":
-		// 边界对象句柄数组（handle 流，按 path 尾部计数读入；gold 逐位
+		// 边界对象句柄数组（handle 流，按 path 尾部计数读入；参考 JSON 逐位
 		// 对照末位句柄值）
 		if len(P.boundaryHandles) == 0 {
 			return nil
@@ -2002,7 +1998,7 @@ func HatchSegAuditField(s *HatchSeg, sub string) any {
 	case "end_tangent":
 		return Point2Arr(s.endTan)
 	case "control_points", "fitpts":
-		// gold 为 {point:[x,y]} 对象数组（flattenJSONGold 展平为
+		// 参考 JSON 为 {point:[x,y]} 对象数组（flattenJSONGold 展平为
 		// control_points[i].point），由数组下标键导出
 		return nil
 	}
@@ -2062,7 +2058,7 @@ func auditArrayIndex(key, Name string) (idx int, rest string, ok bool) {
 	return n, rest, true
 }
 
-// B2int bool 转 0/1 整型。返回 int64 与审计值比较口径一致
+// B2int bool 转 0/1 整型。返回 int64 与审计值比较规则一致
 // （auditValueMatch 的数值分支只识别 float64/int64/bool）。
 func B2int(b bool) int64 {
 	if b {
@@ -2089,7 +2085,7 @@ func Pt2Arr(P []Point2) []float64 {
 // F64Arr 复制浮点切片，避免审计结果与输入共享底层数组；空输入返回 nil。
 func F64Arr(v []float64) []float64 { return append([]float64(nil), v...) }
 
-// colorAuditValue gold 的 color 键：ByLayer/索引色输出 ACI 索引；
+// colorAuditValue 参考 JSON 的 color 键：ByLayer/索引色输出 ACI 索引；
 // 真彩色输出 0xC0000000|RGB 形态的十进制值。
 func colorAuditValue(c EntColor) any {
 	if c.HasTrue {
@@ -2101,7 +2097,7 @@ func colorAuditValue(c EntColor) any {
 	return int64(256) // BYLAYER
 }
 
-// NearF 浮点近似比较（审计容差与内部对象口径一致）。
+// NearF 浮点近似比较（审计容差与内部对象规则一致）。
 func NearF(a, b float64) bool {
 	if a == b {
 		return true
@@ -2145,7 +2141,7 @@ func EntityValueEqual(got, want any) bool {
 // Point2Arr 将二维点复制为按 X、Y 排列的数值切片。
 func Point2Arr(P Point2) []float64 { return []float64{P.X, P.Y} }
 
-// p3sFlat 点数组展平为 [x,y,z,x,y,z,...]（gold 二维嵌套数组的导出形态，
+// p3sFlat 点数组展平为 [x,y,z,x,y,z,...]（参考 JSON 二维嵌套数组的导出形态，
 // 测试侧 jsonTestValueMatch 做嵌套展开对照）。
 func p3sFlat(pts []Point3) []float64 {
 	out := make([]float64, 0, len(pts)*3)
@@ -2176,7 +2172,7 @@ func expandUnicodeEscapes(s string) string {
 	return b.String()
 }
 
-// eedFieldValue 导出 gold 展平的 EED 组码对键（eed[i].code/size/value）：
+// eedFieldValue 导出 参考 JSON 展平的 EED 组码对键（eed[i].code/size/value）：
 // 各 EED 项的组码对按顺序展平编号，项的第一个对上可查 size（项数据字节数）。
 func eedFieldValue(items []entEED, key string) any {
 	rb := strings.Index(key, "]")
@@ -2211,13 +2207,13 @@ func eedFieldValue(items []entEED, key string) any {
 	return nil
 }
 
-// underlayAuditField UNDERLAY 家族审计键导出（gold 标量键 angle/flag/
+// underlayAuditField UNDERLAY 家族审计键导出（参考标量键 angle/flag/
 // contrast/fade；definition_id/extrusion/ins_pt/scale/clip_verts 为数组
 // 键，审计展平循环按类型过滤跳过，无需导出）。
 func underlayAuditField(u *EntUnderlay, key string) any {
 	switch key {
 	case "angle":
-		// gold JSON 输出弧度原值（out_json 无角度制转换）
+		// 参考 JSON 输出弧度原值（out_json 无角度制转换）
 		return u.Angle
 	case "flag":
 		return int64(u.Flag)

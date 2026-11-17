@@ -1,6 +1,10 @@
-// entities_dimension.go 实现 DIMENSION 实体族（线性/对齐/角度/半径/直径/坐标）
-// 的公共数据与各类型专属布局解码。字段序对照 LibreDWG dwg.spec
-// COMMON_ENTITY_DIMENSION 与 ODA 20.4.22-20.4.27 逐位校准。
+// 本文件解析 DIMENSION 标注实体的公共字段和类型专用字段。
+//
+// 覆盖线性、对齐、角度、半径、直径及坐标标注；公共数据、文字和句柄
+// 按对应 DWG 版本读取。
+//
+// 格式参考：LibreDWG 的 COMMON_ENTITY_DIMENSION 及各标注实体定义。
+
 package entity
 
 import (
@@ -121,7 +125,7 @@ type EntDimension struct {
 	HasLeader     bool
 	Leader1Pt     Point3
 	Leader2Pt     Point3
-	LeaderLen     float64 // RADIUS/DIAMETER 引线长（gold leader_len）
+	LeaderLen     float64 // RADIUS/DIAMETER 引线长（参考 JSON leader_len）
 }
 
 // dimSpecificData 类型专属字段解析结果。
@@ -133,7 +137,7 @@ type dimSpecificData struct {
 	HasPoint15                bool
 	p16x, P16y                float64
 	HasPoint16                bool
-	LeaderLen                 float64 // RADIUS/DIAMETER 引线长（gold leader_len）
+	LeaderLen                 float64 // RADIUS/DIAMETER 引线长（参考 JSON leader_len）
 	Flag2                     uint8   // ORDINATE 专属 RC
 	// 弧长专属（ARC_DIMENSION）
 	DefPt         Point3
@@ -322,16 +326,14 @@ func readDimSpecific(r *bitstream.BitStream, layout DimSpecificLayout) (dimSpeci
 	return d, nil
 }
 
-// DecodeDimension 按版本解码标注实体。R13+ 各版本位流均为确定性布局
-// （LibreDWG dwg.spec COMMON_ENTITY_DIMENSION，已经 dwgread -v9 trace
-// 逐字段核对），优先确定性解码；公共头边界异常导致 body 中途失败时
-// 才回退变体扫描兜底。
+// DecodeDimension 按版本优先使用标准字段布局读取标注实体。
+// 标准路径失败时恢复到起始位置，尝试候选布局扫描。
 func DecodeDimension(r *bitstream.BitStream, Head *CommonEntityHead, ver container.DwgVersion, layout DimSpecificLayout) (any, error) {
 	pos := r.TellBits()
 	if d, err := decodeDimCanonical(r, Head, ver, layout); err == nil {
 		return d, nil
 	}
-	// 兜底：canonical 失败（公共头边界异常等）时从原起点走变体扫描。
+	// 回退：canonical 失败（公共头边界异常等）时从原起点走变体扫描。
 	r.SetBitPos(pos)
 	if ver == container.VerR2000 || ver == container.VerR13 || ver == container.VerR14 || ver == container.VerR2004 {
 		if ent, err := ScanDimShapes(r, Head, layout, R2000DimShapes, DecodeDimR2000Variant); err == nil {
@@ -351,10 +353,9 @@ func DecodeDimension(r *bitstream.BitStream, Head *CommonEntityHead, ver contain
 // 显式枚举判断，避免 iota 顺序变化时 >= 比较失真。
 func dimVerR2007Plus(v container.DwgVersion) bool { return v == container.VerR2007 || v.R2010Plus() }
 
-// dimStringStream R2007+ 对象尾部字符串流读取器。R2007+ 的字符串内容
-// 不占主位流，集中存放在 bitsize 前的 string stream 区域
-// （LibreDWG obj_string_stream 口径，已经 trace 逐位核对）：
-// bitsize-1 位是 has_strings 标志，其前是 data_size（RS,LE）指示的数据区。
+// dimStringStream 读取 R2007 及之后版本记录尾部的字符串流。
+// 字符串不占主字段流；bitsize 前的标志和长度字段用于确定字符串区边界。
+// 格式参考：LibreDWG 的 obj_string_stream。
 type dimStringStream struct {
 	r   *bitstream.BitStream
 	pos uint64 // 字符串流自身的读取位（独立于主位流游标）
@@ -425,7 +426,7 @@ func (s *dimStringStream) readTU(r *bitstream.BitStream, enterPos uint64) string
 // （common → dimstyle → block，顺序与 dwg.spec 一致）。
 func decodeDimCanonical(r *bitstream.BitStream, Head *CommonEntityHead, ver container.DwgVersion, layout DimSpecificLayout) (*EntDimension, error) {
 	trOn := cadTraceHandle != 0 && cadTraceHandle == Head.Handle
-	// dimR2000Plus attachment 段起始于 R2000；注意 verR2000 是枚举零值，
+	// dimR2000Plus attachment 段起始于 R2000；注意 VerR2000 是枚举零值，
 	// 不可用 >= 判断（R13/R14 枚举值更大但布局更旧）。
 	dimR2000Plus := ver == container.VerR2000 || ver == container.VerR2004 || dimVerR2007Plus(ver)
 	d := &EntDimension{BaseEntity: BaseEntity{Handle: Head.Handle, Color: Head.Color, Mode: Head.EntityMode}}

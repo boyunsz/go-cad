@@ -1,11 +1,8 @@
-// container.go 实现 DWG R2004+（AC1018~AC1032）物理容器与 R2000（AC1015）
-// 段目录的解析：加密容器头、页表（page map）、段表（section map）、数据页
-// 解密解压与段数据装配。
+// Package container 提供 DWG 版本识别、容器解析、段数据读取与压缩工具。
 //
-// 模块划分：版本识别（detectVersion/verString）、R2004+ 头解密
-// （decryptR2004Header/lcgKeyStream）、系统段解压（inflateSystemSection）、
-// 页表/段表解析（parsePageMap/parseSectionMap）、段装配（assembleSection）、
-// R2000 段目录（parseR2000Directory/readR2000Section）。
+// 容器读取按 R2000、R2004 系列和 R2007 布局分别处理，包括头部解码、
+// 目录与页表解析、页面解压及段数据装配。调用方通过 LoadNamedSectionData
+// 按名称读取段数据。
 package container
 
 import (
@@ -24,7 +21,7 @@ const (
 )
 
 var (
-	// sentinelClassesBefore/After AcDb:Classes 段前后哨兵字节。
+	// SentinelClassesBefore/After AcDb:Classes 段前后哨兵字节。
 	SentinelClassesBefore = [16]byte{0x8D, 0xA1, 0xC4, 0xB8, 0xC4, 0xA9, 0xF8, 0xC5, 0xC0, 0xDC, 0xF4, 0x5F, 0xE7, 0xCF, 0xB6, 0x8A}
 	SentinelClassesAfter  = [16]byte{0x72, 0x5E, 0x3B, 0x47, 0x3B, 0x56, 0x07, 0x3A, 0x3F, 0x23, 0x0B, 0xA0, 0x18, 0x30, 0x49, 0x75}
 )
@@ -68,7 +65,7 @@ const (
 	VerR11                     // AC1009（pre-R13：+sentinel/CRC 包夹与 APPID/DIMSTYLE/VX 表）
 )
 
-// versionMagic 魔数 → 版本对照表（detectVersion 与 verString 共用一套映射，
+// versionMagic 魔数 → 版本对照表（DetectVersion 与 VerString 共用一套映射，
 // 表中缺省版本默认回落 AC1032）。
 var versionMagic = map[DwgVersion]string{
 	VerR2000: "AC1015",
@@ -92,7 +89,7 @@ func (v DwgVersion) VerString() string {
 	return "AC1032"
 }
 
-// PreR13 是否 pre-R13 家族（字节对齐固定偏移布局，与 R13+ 位流容器完全不同）。
+// PreR13 判断版本是否使用 R13 之前的字节对齐记录格式。
 func (v DwgVersion) PreR13() bool { return v == VerR9 || v == VerR10 || v == VerR11 }
 
 // R2010Plus 对象记录是否带 UMC/OT 类型码前缀。
@@ -112,7 +109,7 @@ func DetectVersion(Data []byte) (DwgVersion, error) {
 	return 0, fmt.Errorf("cad: 不支持的 DWG 版本 %q（支持 AC1004/AC1006/AC1009/AC1014/AC1015/AC1018/AC1021/AC1024/AC1027/AC1032）", magic)
 }
 
-// ReadCodepage 读取文件头 0x13 处的 2 字节 codepage 编号（过短文件按 30 兜底）。
+// ReadCodepage 读取文件头 0x13 处的 2 字节 codepage 编号（过短文件按 30 回退）。
 func ReadCodepage(Data []byte) uint16 {
 	if len(Data) < 0x15 {
 		return 30
@@ -383,7 +380,7 @@ func ReadCString(b []byte) string {
 	return string(b)
 }
 
-// ---- R2000 (AC1015) 容器：段目录在 0x15，段数据不压缩直接切片 ----
+// R2000 (AC1015) 容器：段目录在 0x15，段数据不压缩直接切片。
 
 // r2000Locator R2000 段定位记录。
 type r2000Locator struct {

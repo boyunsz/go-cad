@@ -1,6 +1,10 @@
-// 本文件实现渲染设置族内部对象（dwg2.spec）：RENDERSETTINGS/
-// MENTALRAYRENDERSETTINGS/RAPIDRTRENDERSETTINGS（AcDbRenderSettings
-// 公共前导）、RENDERENTRY、RENDERGLOBAL。
+// 本文件解析渲染设置和渲染记录对象。
+//
+// 各渲染器设置复用 AcDbRenderSettings 公共字段，并读取专用配置。
+// 对象包括 RENDERSETTINGS、MENTALRAYRENDERSETTINGS、
+// RAPIDRTRENDERSETTINGS、RENDERENTRY 和 RENDERGLOBAL。
+//
+// 格式参考：LibreDWG dwg2.spec 中对应的对象定义。
 
 package object
 

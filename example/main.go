@@ -1,5 +1,6 @@
-// Command example converts a drawing into SVG, PNG, and diagnostic reports.
-// Run from this directory with go run . -f drawing.dwg -o output.
+// Command example 将输入图纸转换为 SVG、PNG，并输出转换诊断信息。
+//
+// 在本目录执行 go run . -f drawing.dwg -o output；其他选项见命令行帮助。
 package main
 
 import (

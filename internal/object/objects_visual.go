@@ -1,6 +1,9 @@
-// 本文件实现展示类内部对象的解码：VISUALSTYLE（507）、LAYOUT（82）、
-// MATERIAL（506）、SUN、ACSH_HISTORY_CLASS、TABLEGEOMETRY、PLACEHOLDER、
-// DICTIONARYWDFLT。字段序对照 dwg.spec / dwg2.spec 与 dwgread -v9 日志。
+// 本文件解析布局、视觉样式、材质及相关显示配置对象。
+//
+// 各解析器读取公共字段、类型专用字段及句柄引用，并处理不同 DWG 版本
+// 的布局差异；解析结果供布局选择、显示处理和字段诊断使用。
+//
+// 格式参考：LibreDWG 的 dwg.spec 和 dwg2.spec。
 
 package object
 
@@ -12,7 +15,7 @@ import (
 	"os"
 )
 
-// ---- VISUALSTYLE（dwg2.spec DWG_OBJECT(VISUALSTYLE)，类 507）----
+// VISUALSTYLE（dwg2.spec DWG_OBJECT(VISUALSTYLE)，类 507）。
 
 // decodeGenericVISUALSTYLE 解析 VISUALSTYLE：
 // R2007 前与 R2007 为老序列（face/edge 字段 + 条件尾块）；
@@ -64,7 +67,7 @@ func decodeVisualStyleOld(R *bitstream.BitStream, Ver container.DwgVersion, fr *
 		{func() error { return fr.BS("edge_intersection_ltype", g) }},
 		{func() error { return fr.BL("display_settings", g) }},
 		{func() error {
-			// BLd 有符号（gold 出现 -50 等，uint32 直读会得 4294967246）
+			// BLd 有符号（参考 JSON 出现 -50 等，uint32 直读会得 4294967246）
 			v, err := fr.R.ReadBL()
 			if err != nil {
 				return err
@@ -204,7 +207,7 @@ func decodeVisualStyleProps(Ver container.DwgVersion, fr *GfRead, g *ObjGeneric)
 	return nil
 }
 
-// ---- LAYOUT（dwg.spec DWG_OBJECT(LAYOUT)，类 82，含 plotsettings 块）----
+// LAYOUT（dwg.spec DWG_OBJECT(LAYOUT)，类 82，含 plotsettings 块）。
 
 // decodeGenericLAYOUT_HDL 按版本读取 LAYOUT 的打印视图、块、视口和 UCS 引用，追加命名字段及句柄。
 // 视口数量越界或句柄读取失败时返回错误。
@@ -357,7 +360,7 @@ func (f *GfRead) Point2RD(key string, g *ObjGeneric) error {
 	return nil
 }
 
-// ---- MATERIAL（dwg2.spec DWG_OBJECT(MATERIAL)，类 506）----
+// MATERIAL（dwg2.spec DWG_OBJECT(MATERIAL)，类 506）。
 
 // decodeGenericMATERIAL 解析 MATERIAL：name/description + 3 组 MAT_COLOR
 // + 6 个 MAT_MAP（blendfactor/projection/tiling/autotransform/
@@ -477,8 +480,7 @@ func decodeGenericMATERIAL(R *bitstream.BitStream, Ver container.DwgVersion, fr 
 	return nil
 }
 
-// ---- 长尾批次：SUN / ACSH_HISTORY_CLASS / TABLEGEOMETRY / PLACEHOLDER /
-//      DICTIONARYWDFLT ----
+// SUN、ACSH_HISTORY_CLASS、TABLEGEOMETRY、PLACEHOLDER 和 DICTIONARYWDFLT。
 
 // decodeGenericSKYLIGHTBACKGROUND 读取 SKYLIGHTBACKGROUND 当前建模的 class_version 字段。
 func decodeGenericSKYLIGHTBACKGROUND(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
@@ -602,7 +604,7 @@ func decodeGenericPLACEHOLDER(R *bitstream.BitStream, Ver container.DwgVersion, 
 	return nil
 }
 
-// ---- TABLESTYLE（dwg2.spec DWG_OBJECT(TABLESTYLE)，类 522）----
+// TABLESTYLE（dwg2.spec DWG_OBJECT(TABLESTYLE)，类 522）。
 
 // readContentFormatFields 读取 ContentFormat_fields 宏（cell 内容格式）。
 // text_style 句柄在 handle 流，nHdl 计数。
@@ -860,7 +862,7 @@ func decodeGenericTABLESTYLE_HDL(R *bitstream.BitStream, Ver container.DwgVersio
 	return nil
 }
 
-// ---- MLEADERSTYLE / SECTIONVIEWSTYLE / DETAILVIEWSTYLE（dwg2.spec）----
+// MLEADERSTYLE / SECTIONVIEWSTYLE / DETAILVIEWSTYLE（dwg2.spec）。
 
 // decodeGenericMLEADERSTYLE 解析 MLEADERSTYLE（类 517）：
 // SINCE R_2010b 读 class_version BS；内容/引线次序 BS 系 + 几何 BD 系 +
@@ -1097,7 +1099,7 @@ func decodeGenericDETAILVIEWSTYLE(R *bitstream.BitStream, Ver container.DwgVersi
 	if err := fr.T("viewlabel_pattern", g); err != nil {
 		return err
 	}
-	// 连接线与边框线区（v9 实测 R2018 序）
+	// 读取连接线和边框线参数。
 	if err := fr.BL("connection_linewt", g); err != nil {
 		return err
 	}
@@ -1261,11 +1263,9 @@ func decodeGenericFIELDLIST(R *bitstream.BitStream, Ver container.DwgVersion, fr
 	return fr.B("unknown", g)
 }
 
-// decodeGenericMTEXTOBJECTCONTEXTDATA MTEXTOBJECTCONTEXTDATA
-// （AcDbAnnotScaleObjectContextData，R2010+ 注释对象上下文）：BS
-// class_version + B is_default + BL attachment + 3BD x_axis_dir/ins_pt
-// （二进制序 ODA bug 反转）+ 4×BD 矩形/范围 + 分栏组；scale 句柄在
-// handle 流（extraHandles=1）。fzw 4 实例实证。
+// decodeGenericMTEXTOBJECTCONTEXTDATA 读取多行文字的注释比例上下文。
+// 字段包括版本、默认状态、附着点、方向、插入点、范围和分栏参数。
+// 此布局按方向在前、插入点在后的顺序读取；比例引用位于句柄流。
 func decodeGenericMTEXTOBJECTCONTEXTDATA(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	if err := fr.BS("class_version", g); err != nil {
 		return err
@@ -1323,9 +1323,8 @@ func decodeGenericMTEXTOBJECTCONTEXTDATA(R *bitstream.BitStream, Ver container.D
 	return nil
 }
 
-// decodeGenericSPATIALFILTER SPATIAL_FILTER（AcDbSpatialFilter 剪裁过滤）：
-// BS num_clip_verts + 2RD 向量 + 3BD 挤出/原点 + 显示/前后裁剪标志 +
-// 2×12 BD 变换矩阵。fzw 1 实例实证。
+// decodeGenericSPATIALFILTER 读取空间裁剪过滤器。
+// 字段包括裁剪顶点、挤出方向、原点、显示及裁剪标志和两个变换矩阵。
 func decodeGenericSPATIALFILTER(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	ncv, err := fr.BSv("num_clip_verts", g)
 	if err != nil {

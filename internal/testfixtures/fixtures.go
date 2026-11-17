@@ -1,5 +1,7 @@
-// Package testfixtures loads optional private regression data without recording
-// drawing paths or names in the repository.
+// Package testfixtures 加载可选的私有回归测试配置。
+//
+// 测试通过匿名标识查询样本路径或参数，避免将本机路径及图纸名称
+// 写入源码。未配置样本时，由依赖该样本的测试决定跳过行为。
 package testfixtures
 
 import (

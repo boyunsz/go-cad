@@ -1,9 +1,9 @@
-// 本文件实现 ACSH 形体系内部对象（dwg2.spec ACSH_*_CLASS）的解码：
-// 公共前导 AcDbEvalExpr_fields + AcDbShHistoryNode_fields（evalexpr/
-// history_node 模式，与 ASSOC 求值图族同源），后接各 primitive 专有
-// 字段；ACSH_BREP_CLASS 额外内嵌 ACTION_3DSOLID（DECODE_3DSOLID +
-// COMMON_3DSOLID）。handle 流顺序 = handle91（value_code=91 时）+
-// history_node.material（+ BREP 的 materials/history_id）。
+// 本文件解析 ACSH 建模历史相关对象。
+//
+// 各类型共享求值表达式和历史节点字段，再读取几何体专用参数。
+// ACSH_BREP_CLASS 还包含 ACIS 数据；材料和历史引用按句柄流顺序读取。
+//
+// 格式参考：LibreDWG dwg2.spec 中的 ACSH_*_CLASS 定义。
 
 package object
 
@@ -448,8 +448,8 @@ func decodeGenericACSH_BREP(R *bitstream.BitStream, Ver container.DwgVersion, fr
 	return nil
 }
 
-// skipAcisWireBits 按 WIRESTRUCT_fields 消费单条线框位（不存值，
-// BREP 对象侧样本无 wireframe 数据，仅保证结构通读）。
+// skipAcisWireBits 按 WIRESTRUCT_fields 读取并跳过单条线框数据。
+// 函数只推进位流位置，不保存线框几何。
 func skipAcisWireBits(R *bitstream.BitStream) error {
 	if _, err := R.ReadRC(); err != nil { // type
 		return err

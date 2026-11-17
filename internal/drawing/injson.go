@@ -1,7 +1,8 @@
-// injson.go imports LibreDWG-style JSON into the shared Document model.
-// Entity and object records retain their source handles and header variables.
-// Imported documents have no original DWG container bytes; supported entities
-// can be exported through the structured R2000 writer.
+// 本文件将 LibreDWG 风格的 JSON 数据导入 Document。
+//
+// 导入过程保留实体和对象的源句柄及头变量。此类文档不包含原始 DWG
+// 容器数据，可通过结构化 R2000 写入器导出已支持的实体与对象。
+
 package drawing
 
 import (
@@ -18,13 +19,13 @@ import (
 // ParseJSON 解析 LibreDWG dwgread -O JSON 风格 JSON 为 Document。
 // 版本取 HEADER.$ACADVER（约定键），缺失时回退 FILEHEADER.version
 // （兼容不同导出器的版本字段位置）。缺 OBJECTS 数组返回错误；未知实体类
-// 跳过并计入 Skipped（对齐解析器兜底惯例，不阻断其余对象）。
+// 跳过并计入 Skipped（对齐解析器回退惯例，不阻断其余对象）。
 // HEADER 段全量键值存入 Document.HeaderVars（原样保存不逐个建模，
 // 查询走 HeaderVar 的 $ 前缀容错），渲染相关键（EXTMIN/EXTMAX/INSBASE/
 // LTSCALE）另提升为结构化字段。
 func ParseJSON(data []byte) (*Document, error) {
 	// dwgread 对非数值 BD 输出裸 nan/-nan/NaN 字面量，标准 json 不支持，
-	// 预处理在值位置归一为 null（与 gold 侧非数值语义等价）。
+	// 预处理在值位置归一为 null（与 参考 JSON 侧非数值语义等价）。
 	if bytes.Contains(data, []byte("nan")) {
 		re := regexp.MustCompile(`([:\[,]\s*)-?[nN]a[nN]`)
 		data = re.ReplaceAll(data, []byte("${1}null"))
@@ -59,8 +60,7 @@ func ParseJSON(data []byte) (*Document, error) {
 		o := JsonObject(m)
 		if name := o.str("entity"); name != "" {
 			if name == "ATTDEF" {
-				// 定义类标记：与 Parse 的 decodeObjects 同口径静默跳过
-				// （不入 entityByHandle，不参与渲染与文本）
+				// 这些结构标记不登记为独立实体，也不参与渲染和文字收集。
 				continue
 			}
 			ent := buildJSONEntity(o, name)
@@ -86,7 +86,7 @@ func ParseJSON(data []byte) (*Document, error) {
 	return doc, nil
 }
 
-// jsonDetectVersion 从 gold JSON 顶层段推导 DWG 版本：优先 HEADER 的
+// jsonDetectVersion 从 参考 JSON 顶层段推导 DWG 版本：优先 HEADER 的
 // $ACADVER 约定键，回退 FILEHEADER.version（dwgread 实际输出位置）；
 // 均缺失时按最新版本处理（实体几何键与版本无关）。
 func jsonDetectVersion(root map[string]any) container.DwgVersion {
@@ -112,7 +112,7 @@ func jsonDetectVersion(root map[string]any) container.DwgVersion {
 	return container.VerR2018
 }
 
-// jsonApplyHeader 消费 gold HEADER 段：全量键值存 HeaderVars（原样），
+// jsonApplyHeader 消费 参考 JSON HEADER 段：全量键值存 HeaderVars（原样），
 // 渲染相关键提升为结构化字段。$ACADVER 由 jsonDetectVersion 消费，
 // 值仍保留在 HeaderVars。EXTMIN/EXTMAX/INSBASE 为 [x,y,z] 数组、LTSCALE
 // 为标量；类型不符的键原样保留在 HeaderVars（不提升）。
@@ -139,7 +139,7 @@ func jsonApplyHeader(doc *Document, h any) {
 }
 
 // HeaderVar 查询 HEADER 变量：键名带 $ 前缀容错（DXF 惯例 $EXTMIN 与
-// gold 键 EXTMIN 等价查询）。未设置返回 (nil, false)。
+// 参考字段 EXTMIN 等价查询）。未设置返回 (nil, false)。
 func (d *Document) HeaderVar(key string) (any, bool) {
 	if d == nil || d.HeaderVars == nil {
 		return nil, false
@@ -160,7 +160,7 @@ func jsonVerString(v any) string {
 	return s
 }
 
-// versionFromStr 版本串 → dwgVersion（与 container.go detectVersion 同表）。
+// versionFromStr 版本串 → DwgVersion（与 container.go DetectVersion 同表）。
 func versionFromStr(s string) (container.DwgVersion, bool) {
 	switch s {
 	case "AC1004":
@@ -189,9 +189,9 @@ func versionFromStr(s string) (container.DwgVersion, bool) {
 	return container.VerR2018, false
 }
 
-// ---- gold JSON 条目的类型化取值辅助 ----
+// 参考 JSON 条目的类型化取值辅助。
 
-// JsonObject gold JSON 的单个 OBJECTS 条目（顶层键值原样保留）。
+// JsonObject 参考 JSON 的单个 OBJECTS 条目（顶层键值原样保留）。
 type JsonObject map[string]any
 
 // raw 取原始值（键缺失返回 nil）。
@@ -237,10 +237,10 @@ func (o JsonObject) f64(key string) float64 {
 	return f
 }
 
-// boolean 取布尔值（gold 以 0/1 整数表达）。
+// boolean 取布尔值（参考 JSON 以 0/1 整数表达）。
 func (o JsonObject) boolean(key string) bool { return o.i64(key) != 0 }
 
-// Handle 取句柄引用值：gold 句柄为 [code, size, value(, absValue)] 数组，
+// Handle 取句柄引用值：参考 JSON 句柄为 [code, size, value(, absValue)] 数组，
 // 末位是绝对句柄（LibreDWG 句柄语义）；非数组/空数组返回 0。
 func (o JsonObject) Handle(key string) uint64 {
 	return jsonHandleValue(o[key])
@@ -267,7 +267,7 @@ func (o JsonObject) p2(key string) entity.Point2 {
 	return entity.Point2{}
 }
 
-// p3 取 3D 点（[x, y(, z)]；gold 侧 2 元形态的 z 恒 0）。
+// p3 取 3D 点（[x, y(, z)]；参考 JSON 侧 2 元形态的 z 恒 0）。
 func (o JsonObject) p3(key string) entity.Point3 {
 	if arr, ok := o[key].([]any); ok {
 		return entity.Point3{X: JsonNumAt(arr, 0), Y: JsonNumAt(arr, 1), Z: JsonNumAt(arr, 2)}
@@ -300,7 +300,7 @@ func (o JsonObject) p3s(key string) []entity.Point3 {
 }
 
 // p2s 取 2D 点数组：兼容 [[x,y],...] 嵌套与 [x,y,x,y,...] 展平两种形态
-// （LWPOLYLINE gold 的 points 为嵌套，展平形态见 LibreDWG 部分版本输出）。
+// （LWPOLYLINE 参考 JSON 的 points 为嵌套，展平形态见 LibreDWG 部分版本输出）。
 func (o JsonObject) p2s(key string) []entity.Point2 {
 	arr, ok := o[key].([]any)
 	if !ok {
@@ -353,9 +353,9 @@ func (o JsonObject) objs(key string) []JsonObject {
 	return out
 }
 
-// ---- 公共头与颜色 ----
+// 公共头与颜色。
 
-// jsonEntColor gold color 键 → entColor。双形态：pre-R2004 为标量
+// jsonEntColor 参考 JSON color 键 → EntColor。双形态：pre-R2004 为标量
 // （ACI 索引 / 0xC0000000|RGB 真彩色 / 256 BYLAYER / 0 ByBlock），
 // R2004+ 为 CMC 对象 {index, rgb, flag}。标量逆映射保持 hasIndex 语义
 // 与解码侧一致（colorAuditValue 对 hasIndex 原值导出：0→(true,0)，
@@ -384,7 +384,7 @@ func jsonEntColor(v any) entity.EntColor {
 	return entity.EntColor{}
 }
 
-// parseHexUint32 解析 gold 的 %06x/%08x 十六进制串。
+// parseHexUint32 解析 参考 JSON 的 %06x/%08x 十六进制串。
 func parseHexUint32(s string) (uint32, error) {
 	var v uint32
 	for i := 0; i < len(s); i++ {
@@ -405,10 +405,10 @@ func parseHexUint32(s string) (uint32, error) {
 	return v, nil
 }
 
-// jsonBase 从 gold 条目填充公共实体字段：baseEntity + commonEntityHead
-// （head 供 entityField 审计导出 ltype_scale/invisible/linewt 等公共键；
-// objSizeBit/recSize 取 gold bitsize/size 使 JSON 来源实体的审计导出与
-// gold 一致）。内部类型名按 DIMENSION_→DIM_ 前缀还原。
+// jsonBase 从 参考 JSON 条目填充公共实体字段：BaseEntity + CommonEntityHead
+// （head 供 EntityField 审计导出 ltype_scale/invisible/linewt 等公共键；
+// objSizeBit/recSize 取 参考 JSON bitsize/size 使 JSON 来源实体的审计导出与
+// 参考 JSON 一致）。内部类型名按 DIMENSION_→DIM_ 前缀还原。
 func jsonBase(o JsonObject, goldName string) entity.BaseEntity {
 	h := o.Handle("handle")
 	base := entity.BaseEntity{
@@ -445,9 +445,9 @@ func jsonBase(o JsonObject, goldName string) entity.BaseEntity {
 		},
 	}
 	if base.Head.LtypeScale == 0 {
-		base.Head.LtypeScale = 1 // 解码侧缺省比例（gold 缺键即 1）
+		base.Head.LtypeScale = 1 // 解码侧缺省比例（参考 JSON 缺键即 1）
 	}
-	// preview 缩略图（hex 串 → 原始字节，entityField 以 %X 导出对照）
+	// preview 缩略图（hex 串 → 原始字节，EntityField 以 %X 导出对照）
 	if base.PreviewExists {
 		if pv := JsonHexBytes(o.str("preview")); pv != nil {
 			base.Head.Preview = pv
@@ -456,8 +456,8 @@ func jsonBase(o JsonObject, goldName string) entity.BaseEntity {
 	return base
 }
 
-// jsonInternalTypeName gold entity 名 → 内部类型名（DIMENSION_LINEAR →
-// DIM_LINEAR，与 decodeEntityByTypeVer 的分发表的短名一致；entityField
+// jsonInternalTypeName 参考 JSON entity 名 → 内部类型名（DIMENSION_LINEAR →
+// DIM_LINEAR，与 decodeEntityByTypeVer 的分发表的短名一致；EntityField
 // 的 entity 键会再映射回全名）。
 func jsonInternalTypeName(gold string) string {
 	const full = "DIMENSION_"
@@ -467,7 +467,7 @@ func jsonInternalTypeName(gold string) string {
 	return gold
 }
 
-// jsonLayerColor LAYER 对象的 gold color 键 → layerColor（标量索引或
+// jsonLayerColor LAYER 对象的 参考 JSON color 键 → LayerColor（标量索引或
 // CMC 对象双形态）；name 为图层真名（DXF 写出消费）。
 func jsonLayerColor(o JsonObject) LayerColor {
 	var lc LayerColor
@@ -489,8 +489,8 @@ func jsonLayerColor(o JsonObject) LayerColor {
 	return lc
 }
 
-// jsonGenericObject 非实体对象 → objGeneric：gold 展平键值对存入 Fields
-// 中间表示（FieldPath 可直接按展平键查询，与解码对象的消费口径一致）。
+// jsonGenericObject 将非实体 JSON 记录转换为 ObjGeneric。
+// 嵌套字段展平后存入 Fields，供 FieldPath 按字段路径查询。
 func jsonGenericObject(o JsonObject, name string, h uint64) *object.ObjGeneric {
 	g := &object.ObjGeneric{Name: name, Handle: h}
 	for k, v := range o {
@@ -504,7 +504,7 @@ func jsonGenericObject(o JsonObject, name string, h uint64) *object.ObjGeneric {
 
 // linkJSONAttribs 将 ATTRIB 关联到 owner INSERT 的 attribs 句柄链
 // （DWG 侧该链存于 INSERT 的 handle 流，JSON 无流可读；ATTRIB 的
-// gold ownerhandle 即宿主 INSERT 句柄， Texts 的 INSERT 属性展开依赖）。
+// 参考 JSON ownerhandle 即宿主 INSERT 句柄， Texts 的 INSERT 属性展开依赖）。
 func linkJSONAttribs(doc *Document) {
 	for h, a := range doc.Attribs {
 		if ins, ok := doc.ByHandle[a.Owner].(*entity.EntInsert); ok {
@@ -513,15 +513,13 @@ func linkJSONAttribs(doc *Document) {
 	}
 }
 
-// ---- 实体构造（entityField 的逆映射，手工 per-type setter）----
+// 实体构造（EntityField 的逆映射，手工 per-type setter）。
 
-// jsonEntityBuilder 单个实体类型的 gold 键 → 实体构造器。
+// jsonEntityBuilder 单个实体类型的 参考字段 → 实体构造器。
 type jsonEntityBuilder func(o JsonObject) any
 
-// jsonEntityBuilders gold entity 名 → 构造器。覆盖九样本全部实体类型
-// （ATTDEF 按 Parse 口径在 ParseJSON 中先行跳过，不入表）；长尾复杂类
-// （HATCH/3DSOLID 系/MULTILEADER 等）填充标量字段与几何主键，二进制
-// 专有段（ACIS 数据、HATCH 图案定义线等）不还原，见各构造器注释。
+// jsonEntityBuilders 将 JSON 实体名称映射到构造函数。
+// 各构造函数恢复已支持的字段；专用载荷和几何的恢复范围见对应实现。
 var jsonEntityBuilders = map[string]jsonEntityBuilder{
 	"LINE":                   jsonBuildLine,
 	"CIRCLE":                 jsonBuildCircle,
@@ -582,7 +580,7 @@ var jsonEntityBuilders = map[string]jsonEntityBuilder{
 	"UNKNOWN_ENT":            jsonBuildUnknownEnt,
 }
 
-// buildJSONEntity 按 gold entity 名分发构造；未注册类型返回 nil。
+// buildJSONEntity 按 参考 JSON entity 名分发构造；未注册类型返回 nil。
 func buildJSONEntity(o JsonObject, name string) any {
 	if b, ok := jsonEntityBuilders[name]; ok {
 		return b(o)
@@ -590,9 +588,8 @@ func buildJSONEntity(o JsonObject, name string) any {
 	return nil
 }
 
-// jsonWithExtra 将 gold 条目中实际存在的扩展键填入 base.extra（键名与
-// 取值类型对齐 DWG 解码器的 extra 填充口径——thickness/extrusion 等
-// 标量由 entityField 经 extra 导出，json 与 dwg 两侧导出键值须一致）。
+// jsonWithExtra 将输入中存在的扩展字段写入 BaseEntity.Extra。
+// 字段名称与值类型使用 DWG 解码器的约定，供 EntityField 统一导出。
 func jsonWithExtra(base entity.BaseEntity, o JsonObject, keys ...string) entity.BaseEntity {
 	for _, k := range keys {
 		if !o.has(k) {
@@ -602,7 +599,7 @@ func jsonWithExtra(base entity.BaseEntity, o JsonObject, keys ...string) entity.
 			base.Extra = map[string]any{}
 		}
 		switch k {
-		case "extrusion": // BE 单位向量 → []float64（与 readBE 后的存储一致）
+		case "extrusion": // BE 单位向量 → []float64（与 ReadBE 后的存储一致）
 			e := o.p3("extrusion")
 			base.Extra[k] = []float64{e.X, e.Y, e.Z}
 		case "z_is_zero", "scale_flag", "has_attribs", "dataflags", "flow_dir":
@@ -628,7 +625,7 @@ func jsonBuildCircle(o JsonObject) any {
 
 // jsonBuildArc 从 JSON 构造 ARC，起止角直接使用源数据的弧度值。
 func jsonBuildArc(o JsonObject) any {
-	// gold start_angle/end_angle 与解码侧同为弧度（AutoCAD 内部存储）
+	// 参考 JSON start_angle/end_angle 与解码侧同为弧度（AutoCAD 内部存储）
 	b := jsonWithExtra(jsonBase(o, "ARC"), o, "thickness", "extrusion")
 	return &entity.EntArc{
 		BaseEntity: b,
@@ -641,7 +638,7 @@ func jsonBuildArc(o JsonObject) any {
 
 // jsonBuildPoint 从 JSON 的 x/y/z 标量构造 POINT；未提供 x 时兼容 location 数组。
 func jsonBuildPoint(o JsonObject) any {
-	// gold POINT 无 location 数组键，以 x/y/z 标量 + x_ang（x 轴角度）表达
+	// 参考 JSON POINT 无 location 数组键，以 x/y/z 标量 + x_ang（x 轴角度）表达
 	p := entity.Point3{X: o.f64("x"), Y: o.f64("y"), Z: o.f64("z")}
 	if !o.has("x") {
 		p = o.p3("location") // 兼容数组形态输出
@@ -664,7 +661,7 @@ func jsonBuildEllipse(o JsonObject) any {
 
 // jsonBuildLwPolyline 从 JSON 顶点和 bulge 数组构造轻量多段线；缺少的 bulge 项补零。
 func jsonBuildLwPolyline(o JsonObject) any {
-	// gold flag 键即解码侧 flags；points 数组为顶点（bulges 缺失段按 0 对齐）
+	// 参考 JSON flag 键即解码侧 flags；points 数组为顶点（bulges 缺失段按 0 对齐）
 	e := &entity.EntLwPolyline{
 		BaseEntity: jsonBase(o, "LWPOLYLINE"),
 		Flags:      uint16(o.i64("flag")),
@@ -674,7 +671,7 @@ func jsonBuildLwPolyline(o JsonObject) any {
 		ConstWidth: o.f64("const_width"),
 		Thickness:  o.f64("thickness"),
 	}
-	// bulges 与 vertices 等长对齐（解码侧缺失补 0 的逆向口径）
+	// bulges 与 vertices 等长对齐（解码侧缺失补 0 的逆向规则）
 	for len(e.Bulges) < len(e.Vertices) {
 		e.Bulges = append(e.Bulges, 0)
 	}
@@ -705,7 +702,7 @@ func jsonBuildText(o JsonObject) any {
 
 // JsonBuildMText 从 JSON 构造多行文字，保留源文本、列宽、字高、附着点和行距参数。
 func JsonBuildMText(o JsonObject) any {
-	// gold text 已按 bit_TV_to_utf8 展开 \U+XXXX，内部直接保存展开后文本
+	// 参考 JSON text 已按 bit_TV_to_utf8 展开 \U+XXXX，内部直接保存展开后文本
 	b := jsonWithExtra(jsonBase(o, "MTEXT"), o, "flow_dir", "extents_height", "extents_width")
 	m := &entity.EntMText{
 		BaseEntity:  b,
@@ -725,7 +722,7 @@ func JsonBuildMText(o JsonObject) any {
 // jsonBuildInsert 从 JSON 构造块插入引用及其变换；属性实例关联由后续链接步骤补齐。
 func jsonBuildInsert(o JsonObject) any {
 	// attribs 由 linkJSONAttribs 后处理按 ATTRIB owner 归属回填；
-	// scale_flag/has_attribs 入 extra（entityField 导出口径与解码侧一致）
+	// scale_flag/has_attribs 入 extra（EntityField 导出规则与解码侧一致）
 	return &entity.EntInsert{
 		BaseEntity:  jsonWithExtra(jsonBase(o, "INSERT"), o, "scale_flag", "has_attribs"),
 		Position:    o.p3("ins_pt"),
@@ -826,7 +823,7 @@ func jsonBuildVertexPface(o JsonObject) any {
 func jsonBuildVertexPfaceFace(o JsonObject) any {
 	f := &entity.EntVertexPfaceFace{
 		BaseEntity: jsonBase(o, "VERTEX_PFACE_FACE"),
-		Flag:       128, // 解码侧恒定值（LibreDWG 同口径），gold 亦输出 128
+		Flag:       128, // 面索引顶点使用标志 128。
 	}
 	for i, v := range o.f64s("vertind") {
 		if i >= 4 {
@@ -907,8 +904,8 @@ func jsonBuildRay(o JsonObject) any {
 // jsonBuildMLine 从 JSON 构造 MLINE，恢复顶点及每条样式线的分段和填充参数。
 func jsonBuildMLine(o JsonObject) any {
 	// base_point/extrusion 为主体 3BD（渲染平铺与法向），verts 的
-	// lines[j].segparms/areafillparms 为样式线段参数——按 gold 分组还原
-	// 并记录每线计数（与 decodeMline 的计数口径一致，分组导出可对齐）
+	// lines[j].segparms/areafillparms 为样式线段参数——按 参考 JSON 分组还原
+	// 并记录每线计数（与 decodeMline 的计数规则一致，分组导出可对齐）
 	m := &entity.EntMLine{
 		BaseEntity:    jsonBase(o, "MLINE"),
 		Scale:         o.f64("scale"),
@@ -962,7 +959,7 @@ func JsonBuildHatch(o JsonObject) any {
 		DoubleFlag:          o.boolean("double_flag"),
 	}
 	// 图案定义线（deflines）：angle + 原点 + 偏移 + 划线参数数组，
-	// 与 decodeHatch 的 hatchDefLine 同构还原（渲染按线距平铺时消费）
+	// 与 decodeHatch 的 HatchDefLine 同构还原（渲染按线距平铺时消费）
 	for _, d := range o.objs("deflines") {
 		h.Deflines = append(h.Deflines, entity.HatchDefLine{
 			Angle:  d.f64("angle"),
@@ -1109,7 +1106,7 @@ func jsonBuildViewport(o JsonObject) any {
 // JsonBuildLeader 从 JSON 恢复引线顶点、标注引用、样式和箭头开关等参数。
 func JsonBuildLeader(o JsonObject) any {
 	// LEADER 标量基键；annotated/points 等数组键由解码侧同样不入审计导出，
-	// 渲染消费的顶点数组在 entLeader 中按需还原
+	// 渲染消费的顶点数组在 EntLeader 中按需还原
 	l := &entity.EntLeader{
 		BaseEntity: jsonBase(o, "LEADER"),
 		Dimstyle:   o.Handle("dimstyle"), AssociatedAnnotation: o.Handle("associated_annotation"), ArrowheadOn: o.i64("arrowhead_on") != 0, ArrowheadType: uint16(o.i64("arrowhead_type")),
@@ -1186,8 +1183,7 @@ func jsonBuildDimension(o JsonObject) any {
 
 // jsonBuildAcis 从 JSON 恢复 ACIS 实体标量，并按版本解析文本模型或块状数据。
 func jsonBuildAcis(o JsonObject) any {
-	// 标量基键还原；acis_data（ACIS 文本模型）按 version 双形态还原到
-	// acisData（与 decodeAcisVer 同一存储口径，JSON 来源实体消费侧完整）
+	// 按版本恢复 ACIS 标量和 AcisData；SAT 保存文本，SAB 保存二进制数据。
 	gold := o.str("entity")
 	a := &entity.EntAcis{
 		BaseEntity:           jsonBase(o, gold),
@@ -1205,12 +1201,9 @@ func jsonBuildAcis(o JsonObject) any {
 		RevisionMinor2:       uint16(o.i64("revision_minor2")),
 		EndMarker:            uint32(o.i64("end_marker")),
 	}
-	// acis_data 数组还原（out_json json_3dsolid 的 ARRAY 输出）：
-	// SAT（version<2）为按 \n 分行的文本数组（行分隔符不保留，重组以 \n
-	// 连接，与 acis_empty=0 时的解混淆文本一致）；SAB（version=2）恒为
-	// ["ACIS BinaryFile", <hex>] 双元素——首元素即 acisData 前 15 字节，
-	// 次元素为剩余字节的 hex 串，sabSize 取总长（decodeAcisVer 的 end 语义）。
-	// acis_empty=1 的实体无该键（gold 同口径不输出）。
+	// 恢复 acis_data 数组。
+	// SAT 文本按换行连接；SAB 由 "ACIS BinaryFile" 标识和后续十六进制
+	// 字节串组成，SabSize 记录恢复后的总字节数。缺少该键时不构造载荷。
 	if !a.AcisEmpty {
 		if lines, ok := o.raw("acis_data").([]any); ok && len(lines) > 0 {
 			if a.Version >= 2 {
@@ -1308,9 +1301,9 @@ func JsonBuildLight(o JsonObject) any {
 	return l
 }
 
-// jsonMLeaderCMC gold CMC 双形态 → mleaderCMC：对象形态（R2004+）与
-// readMLeaderCMC 同口径还原——rgb method 越界时修正为 0xc2 前缀，index
-// 按调色板反查覆盖（与 DWG 侧导出一致）；标量为 pre-R2004 索引。
+// jsonMLeaderCMC 从索引值或结构化颜色记录构造 MleaderCMC。
+// 结构化记录中的 RGB 方法标记无效时使用 0xc2，并尝试反查调色板索引；
+// 未提供 RGB 或反查结果为零时，使用输入中的 index 字段。
 func jsonMLeaderCMC(v any) entity.MleaderCMC {
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -1340,7 +1333,7 @@ func jsonMLeaderCMC(v any) entity.MleaderCMC {
 // 文本与块内容按对应分支恢复，保留引线和线段的层次关系。
 func jsonBuildMLeader(o JsonObject) any {
 	// 顶层标量 + ctx 全结构还原（jsonMLeaderCtx：leaders/lines 三层嵌套、
-	// txt/blk 内容两分支、base 三点组；键名均为 gold 展平键）+ 顶层 CMC
+	// txt/blk 内容两分支、base 三点组；键名均为 参考 JSON 展平键）+ 顶层 CMC
 	// 双形态与句柄系，与 decodeMLeader 的模型字段一一对应
 	m := &entity.EntMLeader{BaseEntity: jsonBase(o, "MULTILEADER")}
 	if o.has("class_version") {
@@ -1376,7 +1369,7 @@ func jsonBuildMLeader(o JsonObject) any {
 	m.Justification = uint16(o.i64("justification"))
 	m.ScaleFactor = o.f64("scale_factor")
 	// VERSIONS(R_14, R_2007) 的箭头/块标签数组与 SINCE R_2010b/R_2013b
-	// 尾段：gold 按版本段条件输出，键缺失时零值（与解码侧分支一致）
+	// 尾段：参考 JSON 按版本段条件输出，键缺失时零值（与解码侧分支一致）
 	for _, ao := range o.objs("arrowheads") {
 		m.Arrowheads = append(m.Arrowheads, entity.MleaderArrowhead{
 			IsDefault: ao.boolean("is_default"),
@@ -1402,9 +1395,9 @@ func jsonBuildMLeader(o JsonObject) any {
 	return m
 }
 
-// jsonMLeaderCtx gold 展平 ctx 键 → mleaderContextData：标量组、
+// jsonMLeaderCtx 参考 JSON 展平 ctx 键 → mleaderContextData：标量组、
 // leaders→lines→breaks/points 三层嵌套、content txt/blk 内容两分支与
-// base 三点组。gold 的 has_content_txt 缺省（pre-R2004 无该键形态）按
+// base 三点组。参考 JSON 的 has_content_txt 缺省（pre-R2004 无该键形态）按
 // content.txt 键存在性判定（LibreDWG HAS_CONTENT 分支输出键集互斥）。
 func jsonMLeaderCtx(o JsonObject, m *entity.EntMLeader) {
 	c := &m.Ctx
@@ -1551,7 +1544,7 @@ func jsonBuildUnknownEnt(o JsonObject) any {
 	return e
 }
 
-// JsonHexBytes gold 的十六进制串（data/preview 等）还原为字节；空串返回 nil。
+// JsonHexBytes 参考 JSON 的十六进制串（data/preview 等）还原为字节；空串返回 nil。
 func JsonHexBytes(s string) []byte {
 	if s == "" || len(s)%2 != 0 {
 		return nil

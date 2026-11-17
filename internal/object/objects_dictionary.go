@@ -1,7 +1,10 @@
-// 本文件实现对象段 DICTIONARY（0x2A）与 XRECORD（0x4F）的解码：
-// 布局对照 LibreDWG dwg.spec 对应块与 dwgread -v9 字段日志逐位验证；
-// xdata 项解析（resbufValueType DXF 码段表）同在此处。
-// 公共头 bitsize 定位随版本不同（见 objects_generic.go 的 dictBitsizePos）。
+// 本文件解析 DICTIONARY 和 XRECORD 对象及其扩展数据。
+//
+// 记录头和数据位数位置按 DWG 版本确定；扩展数据按 DXF 组码对应的
+// 值类型读取。解析结果保留字典项、句柄引用和扩展数据项。
+//
+// 格式参考：LibreDWG dwg.spec 中对应的对象定义。
+
 package object
 
 import (
@@ -197,11 +200,10 @@ func (x *ObjXrecord) XdataSizeBytes() int { return x.XdataSize }
 // XdataItems 返回 xdata 类型化值序列。
 func (x *ObjXrecord) XdataItems() []XdataItem { return x.Xdata }
 
-// DecodeXrecordObject 解析 XRECORD 对象（dwg2.spec DWG_OBJECT(XRECORD)）。
-// dat 流：[版本相关内联 RL bitsize] + H handle + EED + BL num_reactors
-// + [R2004+ B is_xdic_missing] + [R2013+ B has_ds_data] + BL xdata_size
-// + xdata 原始字节（内容暂不解析） + [R2000b+ BS cloning]。
-// handle 流（bitsize 起）：ownerhandle + reactors + xdic + objid_handles 至流尾。
+// DecodeXrecordObject 读取 XRECORD 的公共头、扩展数据和句柄引用。
+// 扩展数据按组码解码为类型化值，R2000b 及之后版本另读 cloning 字段。
+// 句柄区包含所属对象、反应器、扩展字典和后续对象引用；原始句柄位串
+// 同时保留，供回放式写出使用。
 func DecodeXrecordObject(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver container.DwgVersion, r2013Plus bool) (*ObjXrecord, error) {
 	x := &ObjXrecord{}
 	var err error
@@ -340,7 +342,7 @@ const (
 )
 
 // dictBitsizePos 返回版本的 DICTIONARY/XRECORD bitsize 定位策略。
-// 注意版本枚举非时间序（verR2000=0、verR14=1），范围比较会把 R14
+// 注意版本枚举非时间序（VerR2000=0、VerR14=1），范围比较会把 R14
 // 误判为 R2000+，这里必须显式枚举成员。
 func dictBitsizePos(Ver container.DwgVersion) objBitsizePos {
 	switch {
@@ -478,7 +480,7 @@ func parseEEDChain(R *bitstream.BitStream, Ver container.DwgVersion, out *[]ObjF
 				}
 				val = int64(v)
 			case 3:
-				// layer：RS + RLL（LibreDWG 同款双读）
+				// layer：RS + RLL（LibreDWG 相同双读）
 				if _, e := R.ReadRS(); e != nil {
 					return fail(e)
 				}
@@ -621,7 +623,7 @@ func (it XdataItem) KindName() string {
 	return "Unknown"
 }
 
-// Val 返回 JSON 同形值
+// Val 返回与 JSON 导出表示一致的记录值。
 func (it XdataItem) Val() any {
 	switch it.Kind {
 	case XdataReal:
@@ -654,7 +656,7 @@ const (
 	XdataBool
 )
 
-// ResbufValueType DXF 组码 → 值类型（对照 LibreDWG dwg_resbuf_value_type）
+// ResbufValueType 根据 DXF 组码确定记录值类型，类型规则参考 LibreDWG dwg_resbuf_value_type。
 func ResbufValueType(gc int) XdataKind {
 	switch {
 	case gc < 0:

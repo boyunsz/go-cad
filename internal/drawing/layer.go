@@ -1,7 +1,9 @@
-// layer.go 实现 LAYER 表记录解析：handle → 颜色映射（渲染的图层颜色继承
-// 依据）。R2010+ 的图层名存于字符串流，渲染不需要图层名，此处仅解析颜色。
-// 颜色 CMC 的字段排列存在版本间变体，采用「变体位模式扫描 + 合理性评分」
-// 的消解策略：对每种前后未知位数的排列各自试解，按候选合理性评分择优。
+// 本文件解析 LAYER 表记录，提供图层颜色、名称和显示属性。
+//
+// 解析器优先使用对应版本的字段布局；解析失败时，根据支持的版本
+// 回退到记录扫描和颜色候选评分。图层名按版本从内联字段或字符串流
+// 读取，结果供颜色继承、可见性判断和图层信息导出使用。
+
 package drawing
 
 import (
@@ -12,9 +14,8 @@ import (
 	"github.com/boyunsz/go-cad/internal/objrec"
 )
 
-// LayerColor LAYER 记录解析结果。name 为图层真名（DXF 写出与符号表
-// 消费方使用；渲染不需要，故历史路径未保存——R13-R2007 在扫描定位时
-// 顺手捕获，R2010+ 从对象字符串流补读，JSON/DXF 来源直接来自解析输入）。
+// LayerColor 保存 LAYER 表记录的名称、颜色及显示和打印属性。
+// 名称用于图层查询和导出；属性是否可用由对应 Known 标志区分。
 type LayerColor struct {
 	Off, Frozen       bool
 	NoPlot, PlotKnown bool
@@ -50,8 +51,7 @@ func decodeLayerRecord(rec *objrec.ObjectRecord, objHandle uint64, ver container
 		}
 	}
 	if ver == container.VerR13 || ver == container.VerR14 || ver == container.VerR2000 {
-		// R13/R14/R2000：dat 流顺序完全确定，直接按 spec 解析并以
-		// bitsize 闭环校验；失败时回退历史扫描路径。
+		// 按 R13/R14/R2000 字段布局解析并检查数据区结束位置；失败时尝试扫描解析。
 		if lc, err := decodeLayerRecordPreR2004(rec, objHandle, ver, cp); err == nil {
 			return lc, nil
 		}
@@ -62,10 +62,8 @@ func decodeLayerRecord(rec *objrec.ObjectRecord, objHandle uint64, ver container
 	return scanLayerRecordClassic(rec, objHandle, ver, cp)
 }
 
-// decodeLayerRecordR2010Plus R2010+ 路径：先走 dat 流确定式解析
-// （对照 LibreDWG dwg_decode_object 与 dwg.spec COMMON_TABLE_FLAGS(Layer)，
-// 以记录头 UMC 推导的 bitsize 闭环校验），失败回退历史扫描路径
-// （类型码前缀 + 8 变体颜色扫描，名称走字符串流）。
+// decodeLayerRecordR2010Plus 优先按 R2010 及之后版本的字段布局解析图层。
+// 解析失败时扫描颜色候选，并从记录尾部字符串流补读名称。
 func decodeLayerRecordR2010Plus(rec *objrec.ObjectRecord, objHandle uint64, ver container.DwgVersion) (LayerColor, error) {
 	if lc, err := parseLayerSpecR2010Plus(rec, objHandle, ver); err == nil {
 		return lc, nil
@@ -139,7 +137,7 @@ func scanLayerRecordClassic(rec *objrec.ObjectRecord, objHandle uint64, ver cont
 	if ver == container.VerR2007 {
 		// R2007 的名称已入字符串流（COMMON_TABLE_FLAGS FIELD_T 自 R2007
 		// 起 TU 字符串区存储），主位流扫描读不到——按内联 bitsize 定位
-		// 字符串区补读（与通用内部对象解码同款公式）。
+		// 字符串区补读（与通用内部对象解码相同公式）。
 		if nm, ok := readLayerNameStringStream(rec); ok {
 			lc.Name = nm
 		}
@@ -205,12 +203,9 @@ func parseLayerSpecR2010Plus(rec *objrec.ObjectRecord, objHandle uint64, ver con
 	if _, err := r.ReadRC(); err != nil { // CMC 标志字节
 		return lc, err
 	}
-	// bitsize 闭环：R2010+ 无内联 bitsize，由记录头 UMC 推导。dat 流 =
-	// 字段区 + 字符串流区（物理在 dat 流尾部）：has_strings 位在
-	// dataEndBit-1，data_size RS 在 dataEndBit-17，字符串区起点 =
-	// dataEndBit-17-data_size。字段区（CMC 后）结束位与字符串区起点严丝
-	// 合缝即整条 dat 流零歧义（has_strings=0 时无字符串区，仅校验字段区
-	// 不越过 has_strings 位）。
+	// 检查字段区与字符串流边界。
+	// R2010 及之后版本的数据区结束位由记录头推导；尾部标志和长度字段
+	// 用于定位字符串区。无字符串时，只检查字段区是否越过尾部标志。
 	endBit := r.TellBits()
 	strEnd := rec.DataEndBit()
 	if strEnd < 34 {
@@ -230,7 +225,7 @@ func parseLayerSpecR2010Plus(rec *objrec.ObjectRecord, objHandle uint64, ver con
 			return lc, e
 		}
 		if ds&0x8000 != 0 {
-			// 扩展格式：hi_size RS 在 bitsize-33（对齐 readStringAreaBitRange）
+			// 扩展格式：hi_size RS 在 bitsize-33（对齐 ReadStringAreaBitRange）
 			rr.SetBitPos(strEnd - 33)
 			hi, e := rr.ReadRS()
 			if e != nil {
@@ -253,8 +248,8 @@ func parseLayerSpecR2010Plus(rec *objrec.ObjectRecord, objHandle uint64, ver con
 	return lc, nil
 }
 
-// extractTrueColor 从 CMC 真彩字段提取 24 位真值：高字节为 0 视为未设置
-// （优先索引色），仅保留带标记字节的非零真值。
+// extractTrueColor 提取带有效方法标记的 24 位真彩色值。
+// 高字节为零或提取结果为零时返回零，交由调用方继续处理索引色。
 func extractTrueColor(rgb uint32) (uint32, bool) {
 	if rgb == 0 || rgb>>24 == 0 {
 		return 0, false
@@ -279,15 +274,12 @@ func readR2010PlusLayerName(rec *objrec.ObjectRecord) string {
 	return ""
 }
 
-// decodeLayerRecordPreR2004 R13/R14/R2000 的 LAYER dat 流确定式解析。
-// 布局对照 LibreDWG dwg_decode_object 与 dwg.spec COMMON_TABLE_FLAGS(Layer)：
-// [R2000 RL bitsize] + H handle + EED + [R13/R14 RL bitsize] + BL reactors
-// + TV 名称 + B is_xref_ref + BS is_xref_resolved + B is_xref_dep
-// + [R13/R14 B frozen/off/frozen_in_new/locked | R2000 BS flag0] + CMC(BS index)。
-// bitsize 以 body 起点（BS 类型码之前，不含 MS 尺寸字段）为基准，是 dat 流
-// 到 handle 流的边界位：解析结束位 == bitsize 即整条 dat 流零歧义（对全部
-// LAYER 记录实测成立）。CMC 为 R2004 前形态（仅 BS 索引，off 时负值；
-// 真彩/rgb 段是 R2004+ 才引入）。
+// decodeLayerRecordPreR2004 按 R13/R14/R2000 布局解析 LAYER 记录。
+// 依次读取位数、句柄、扩展数据、名称、外部引用标志、状态和索引色，
+// 并检查读取位置是否到达句柄流边界。此版本分支不读取 R2004 引入的
+// 真彩色数据。
+//
+// 格式参考：LibreDWG 的对象公共头和 COMMON_TABLE_FLAGS 定义。
 func decodeLayerRecordPreR2004(rec *objrec.ObjectRecord, objHandle uint64, ver container.DwgVersion, cp uint16) (LayerColor, error) {
 	h, err := objrec.ParseObjHeader(rec)
 	if err != nil {
@@ -367,8 +359,7 @@ func decodeLayerRecordPreR2004(rec *objrec.ObjectRecord, objHandle uint64, ver c
 	if err != nil {
 		return LayerColor{}, err
 	}
-	// bitsize 闭环：LibreDWG 的 bitsize 以 body 起点（BS 类型码前）为基准，
-	// 与 dat 流结束局部位直接相等即零歧义
+	// 检查数据区读取位置是否等于记录中声明的句柄流起点。
 	if bitsize == 0 || r.TellBits() != bitsize {
 		return LayerColor{}, fmt.Errorf("cad: LAYER bitsize 校验失败（end %d != %d, handle %d）",
 			r.TellBits(), bitsize, objHandle)
@@ -450,7 +441,7 @@ func skipLayerEED(r *bitstream.BitStream) error {
 
 // scanLayerColorVariants 在 CMC 区域按 layerCMCLayouts 全部 8 种变体各自
 // 试解，按 layerColorPlausibility 合理性评分择优（越低越可信，平局取先）；
-// 全部失败时按最简变体兜底解析以保持推进。
+// 全部失败时按最简变体回退解析以保持推进。
 func scanLayerColorVariants(r *bitstream.BitStream, objHandle uint64) (LayerColor, error) {
 	mark, markBit := r.Cursor()
 	var best LayerColor
@@ -484,7 +475,7 @@ func scanLayerColorVariants(r *bitstream.BitStream, objHandle uint64) (LayerColo
 // [flag 前 2 位×bit0] + B flag64 + [flag 后 2 位×bit1] + BS xref +
 // B×5 状态位 + [values 前 2 位×bit2] + BS values + BS 颜色索引 +
 // BL rgb + RC 颜色字节 [+ TV 名称串×标志位]。
-// 注意：颜色索引不做 0x01FF 掩码——保留 BS 原始值（gold 中可见 idx>256）。
+// 注意：颜色索引不做 0x01FF 掩码——保留 BS 原始值（参考 JSON 中可见 idx>256）。
 func decodeLayerCMC(r *bitstream.BitStream, layout uint8) (uint16, uint32, bool, uint8, error) {
 	skipBits := func(n int) error {
 		if n > 0 {

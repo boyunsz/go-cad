@@ -1,21 +1,11 @@
-// dxf_read.go 实现 DXF（Drawing eXchange Format）读取：ASCII 与二进制
-// （"AutoCAD Binary DXF"）两种编码统一抽象为组码对流，再按段语义构建与
-// DWG 解析一致的 Document 模型。
+// 本文件将 ASCII 或二进制 DXF 解析为 Document。
 //
-// 主要模块划分：
-//   - 词法层 dxfLexer：ASCII 组码行/值行解析（容忍空格填充与 CR 行尾），
-//     二进制变体的魔数识别、pre-R14 单字节组码探测与按组码类型的记录读取；
-//   - 语义层：HEADER（$ACADVER → 版本枚举）、TABLES（LAYER 表：句柄+颜色）、
-//     BLOCKS（块定义 + *Model_Space 特判）、ENTITIES（主力图元组码 → entXxx）；
-//   - 公开入口 ParseDXF。
+// 词法层将两种编码统一为组码和值，语义层解析 HEADER、TABLES、BLOCKS
+// 及 ENTITIES，并建立实体、图层和块引用关系。实体类型由 buildEntity
+// 及其专用解析函数分派，解析结果复用 DWG 的文档模型。
 //
-// 支持的实体类型（与既有 Document 模型对齐）：LINE/CIRCLE/ARC/POINT/
-// ELLIPSE/TEXT/MTEXT/LWPOLYLINE/POLYLINE+VERTEX/PFACE/MESH/INSERT/ATTRIB/
-// ATTDEF/SOLID/TRACE/3DFACE/RAY/XLINE/SPLINE，以及批次 R 复杂实体
-// DIMENSION(7 型)/HATCH(渐变段+种子点)/LEADER/MULTILEADER(txt+blk 内容)/
-// MLINE/TOLERANCE/VIEWPORT 与极限批次 A 的 REGION/3DSOLID/BODY(SAT 文本
-// 行拼接)。DXF 格式参考 LibreDWG in_dxf.c（读侧）与 dwg.spec/dwg2.spec
-// 的 DXF 组码标注。
+// 格式参考：LibreDWG 的 in_dxf.c、dwg.spec 和 dwg2.spec。
+
 package drawing
 
 import (
@@ -31,13 +21,12 @@ import (
 	"strings"
 )
 
-// DxfBinaryMagic 二进制 DXF 文件头（22 字节，LibreDWG dwg_read_dxf 同款）。
+// DxfBinaryMagic 是二进制 DXF 的 22 字节文件头标识。
 var DxfBinaryMagic = []byte("AutoCAD Binary DXF\r\n\x1a\x00")
 
-// ParseDXF 解析 DXF 字节流（自动识别 ASCII 与二进制编码）为文档模型。
-// 返回的 Document 与 DWG 解析共用：modelSpace/blocks/attribs/layerColors
-// 均按 DWG 语义填充（图层句柄来自 LAYER 表，INSERT.blockHeader 指向
-// BLOCKS 段同名块），可直接用于 RenderPNG / Texts。
+// ParseDXF 将 ASCII 或二进制 DXF 字节流解析为公共文档模型。
+// 读取受支持的实体、块及符号表信息，图层和块引用通过名称或句柄关联。
+// 结果可供文本提取和渲染使用，字段覆盖范围取决于对应类型的构造函数。
 func ParseDXF(data []byte) (*Document, error) {
 	lex, err := newDXFLexer(data)
 	if err != nil {
@@ -173,11 +162,11 @@ func (st *DxfState) skipToEndSec() error {
 	}
 }
 
-// ---- HEADER 段 ----
+// HEADER 段。
 
 // parseHeader 头部变量：$ACADVER（版本枚举）与 $DWGCODEPAGE（码页），
 // 其余键从略。读到码页后，pre-R13（R12 及更早）的 DXF 文本按该码页
-// 解码（复用 DWG 侧 decodeCodepage，GBK 等；R13+ 文本保持字节直读）。
+// 解码（复用 DWG 侧 DecodeCodepage，GBK 等；R13+ 文本保持字节直读）。
 func (st *DxfState) parseHeader() error {
 	for {
 		p, ok, err := st.lexer.next()
@@ -229,7 +218,7 @@ func (st *DxfState) applyCodepage() {
 	}
 }
 
-// DxfCodepageValue DXF $DWGCODEPAGE 名 → DWG 码页编号（decodeCodepage
+// DxfCodepageValue DXF $DWGCODEPAGE 名 → DWG 码页编号（DecodeCodepage
 // 的输入域）：ANSI_936/GBK → 31；windows-125x 家族 → N-1222（1252→30）；
 // 未知名返回 0（保持字节直读，避免历史上 uint16 负溢出产生无效编号）。
 func DxfCodepageValue(name string) uint16 {
@@ -271,7 +260,7 @@ func dxfVersionEnum(ver string) container.DwgVersion {
 	return container.VerR2018
 }
 
-// ---- TABLES 段 ----
+// TABLES 段。
 
 // parseTables 符号表区：仅 LAYER 表需要（名字+颜色），其余表跳到 ENDTAB。
 func (st *DxfState) parseTables() error {
@@ -497,7 +486,7 @@ func (st *DxfState) RecordHandle(rec *DxfRec) uint64 {
 	return h
 }
 
-// ---- BLOCKS 段 ----
+// BLOCKS 段。
 
 // isModelSpaceBlockName 模型空间布局块名（R2000+ 与 R12 两种拼写）。
 func isModelSpaceBlockName(name string) bool {
@@ -533,9 +522,9 @@ func (st *DxfState) parseBlocks() error {
 		if name != "" {
 			st.BlockByName[name] = h
 		}
-		// 块定义元数据（真名 + 基点）以 BLOCK_HEADER 内部对象形态登记，
-		// 与 DWG/JSON 来源统一：DXF 写出侧按句柄从 internalObjects 取
-		// 名称与 base_pt，符号名/块基点三个来源同路消费。
+		// 将块名称和基点登记为 BLOCK_HEADER 内部对象。
+		// DXF 导出按句柄从 InternalObjs 查询名称和 base_pt，与其他输入格式
+		// 使用相同的块元数据查询方式。
 		bg := &object.ObjGeneric{Name: "BLOCK_HEADER", Handle: h,
 			Fields: []object.ObjField{{Key: "name", Val: name}}}
 		if bp, ok := rec.floatVal(10); ok {
@@ -577,10 +566,10 @@ func (st *DxfState) parseBlocks() error {
 	}
 }
 
-// ---- ENTITIES 段与实体构建 ----
+// ENTITIES 段与实体构建。
 
-// parseEntitiesSpace 顶级实体区：全部按模型空间实体处理（67=1 的图纸
-// 空间实体在 buildEntity 内统一跳过，与既有 DWG 解析口径一致）。
+// parseEntitiesSpace 读取 ENTITIES 段，并将已支持实体归入文档。
+// 默认归属模型空间；组码 67 为 1 时，由 buildEntity 标记为图纸空间。
 func (st *DxfState) parseEntitiesSpace() error {
 	for {
 		rec, err := st.readRecord()
@@ -617,19 +606,18 @@ func (st *DxfState) buildBlockEntity(rec *DxfRec, blockHandle uint64) {
 	}
 }
 
-// dxfSupportedEntities DXF 读取支持的实体类型集合（对照测试口径）。
+// dxfSupportedEntities 列出 DXF 实体构造流程接受的类型名称。
 var dxfSupportedEntities = map[string]bool{
 	"LINE": true, "CIRCLE": true, "ARC": true, "POINT": true, "ELLIPSE": true,
 	"TEXT": true, "MTEXT": true, "LWPOLYLINE": true, "POLYLINE": true,
 	"VERTEX": true, "INSERT": true, "ATTRIB": true, "SOLID": true,
 	"TRACE": true, "3DFACE": true, "RAY": true, "XLINE": true, "SPLINE": true,
-	// 批次 R：复杂实体（DIMENSION 各型/HATCH/LEADER/MULTILEADER/MLINE/
-	// TOLERANCE/VIEWPORT），组码构造对照 in_dxf.c + DWG 侧同名解码器
+	// 标注、填充、引线、多线、公差和视口实体。
 	"DIMENSION": true, "HATCH": true, "LEADER": true, "MULTILEADER": true,
 	"MLINE": true, "TOLERANCE": true, "VIEWPORT": true, "IMAGE": true,
-	// 极限批次 A：ATTDEF 属性定义（与 ATTRIB 同构 + prompt 组码 3）
+	// ATTDEF 属性定义，除 ATTRIB 公共字段外还读取组码 3 提示文字。
 	"ATTDEF": true,
-	// 极限批次 A：ACIS 系（SAT 文本行拼接建模，几何内核不在解析范围）
+	// ACIS 实体保留 SAT 数据，几何内核求值不在此处实现。
 	"REGION": true, "3DSOLID": true, "BODY": true,
 }
 
@@ -704,7 +692,7 @@ func (st *DxfState) buildEntity(rec *DxfRec, mode uint8, owner uint64) any {
 			Xline: rec.Typ == "XLINE"}
 	case "SPLINE":
 		ent = st.buildSpline(rec, base)
-	// ---- 批次 R：复杂实体 ----
+	// 复杂实体分派。
 	case "DIMENSION":
 		ent = st.buildDimension(rec, base)
 	case "HATCH":
@@ -783,8 +771,8 @@ func dxfEntityColor(rec *DxfRec) entity.EntColor {
 	return c
 }
 
-// layerHandle 图层名 → LAYER 表句柄；未知名字兜底注册合成图层，
-// 保证实体 layer 引用总能落到 layerColors（渲染按图层取色的前提）。
+// layerHandle 返回图层名称对应的句柄。
+// 名称尚未注册时创建合成图层，并加入文档图层表。
 func (st *DxfState) layerHandle(name string) uint64 {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -977,7 +965,7 @@ func (st *DxfState) buildVertex(rec *DxfRec, base *entity.BaseEntity) any {
 		h.OwnedHandles = append(h.OwnedHandles, v.Handle)
 		return v
 	case *entity.EntPolylinePface:
-		// 子类标记判别（in_dxf UPGRADE_ENTITY 口径）：AcDbFaceRecord 为
+		// 子类标记判别（in_dxf UPGRADE_ENTITY 规则）：AcDbFaceRecord 为
 		// 面记录（71-74 顶点索引），AcDbPolyFaceMeshVertex 为定位顶点
 		if dxfRecHasSubclass(rec, "AcDbFaceRecord") {
 			f := &entity.EntVertexPfaceFace{BaseEntity: *base, Flag: 128}
@@ -1101,8 +1089,8 @@ func (st *DxfState) buildAttrib(rec *DxfRec, base *entity.BaseEntity) any {
 	return a
 }
 
-// buildSeqend SEQEND 序列终止标记的建模口径：
-// DWG 侧 SEQEND 解析为 entBlockLike（owner=POLYLINE/INSERT 宿主，进
+// buildSeqend SEQEND 序列终止标记的建模规则：
+// DWG 侧 SEQEND 解析为 EntBlockLike（owner=POLYLINE/INSERT 宿主，进
 // blocks 归宿主句柄），DXF 读侧对齐——有宿主时建模归宿主，无宿主的
 // 顶层孤立 SEQEND（文件尾散落标记等）不建模，静默跳过。
 // SEQEND 同时终止宿主序列：处理完后清空 POLYLINE 聚合与 INSERT 属性
@@ -1140,8 +1128,8 @@ func (st *DxfState) buildSeqend(rec *DxfRec, mode uint8, owner uint64) any {
 // 10 插入点/40 字高/50 旋转/71 生成/72 水平/74 垂直对齐），另带 3 提示串
 // （ATTRIB 无此组码）。定义类建模：不进 INSERT 的 attribs 引用链（那是
 // ATTRIB 的归属语义），按 330 owner（块定义句柄）归入 blocks；顶层
-// ATTDEF 按 dxfBase 的 owner 兜底逻辑处理（渲染不消费，与 DWG 侧
-// ATTDEF→entAttrib 同构口径一致）。
+// ATTDEF 按 dxfBase 的 owner 回退逻辑处理（渲染不消费，与 DWG 侧
+// ATTDEF→EntAttrib 同构规则一致）。
 func (st *DxfState) buildAttdef(rec *DxfRec, base *entity.BaseEntity) any {
 	a := &entity.EntAttrib{BaseEntity: *base}
 	a.Text = rec.str(1)
@@ -1221,8 +1209,8 @@ func (st *DxfState) buildSpline(rec *DxfRec, base *entity.BaseEntity) any {
 	return s
 }
 
-// BlockHandle 块名 → 块定义句柄；未知名字（前向引用或孤立 INSERT）
-// 兜底注册合成块句柄，保证 INSERT.blockHeader 指向有效归属。
+// BlockHandle 返回块名称对应的句柄；未注册名称时分配合成句柄。
+// 合成句柄用于前向引用，不表示相应块定义或几何已经存在。
 func (st *DxfState) BlockHandle(name string) uint64 {
 	name = strings.TrimSpace(name)
 	if h, ok := st.BlockByName[name]; ok {
@@ -1235,31 +1223,25 @@ func (st *DxfState) BlockHandle(name string) uint64 {
 	return h
 }
 
-// ---- 批次 R：复杂实体构造（组码对照 in_dxf.c + dwg.spec DXF 标注）----
+// 复杂实体构造；组码参考 LibreDWG in_dxf.c 和对应实体定义。
 
 // dxfDegToRad DXF 角度组码（度）→ 内部弧度存储。
 func dxfDegToRad(deg float64) float64 { return deg * math.Pi / 180 }
 
-// buildDimension DIMENSION：70 低 3 位分派 7 型（0=rotated、1=aligned、
-// 2=ang2ln、3=diameter、4=radius、5=ang3pt、6=ordinate），公共段（10 def
-// 点、11 文本中点+31 标高、70 flag、1 用户文字、71 附着、42 实测值、
-// 51/53/54 角度、12 clone_ins）+ 子类段专属点（13/14/15/16）。ANG2LN 的
-// 子类段 16（2RD）对应 DWG 位流尾部 2RD（解码侧 point16x/p16y 载体），
-// 10 恒为 def 点（gold ex2000 h=43B 仲裁）；ORDINATE 的 13/14 为
-// feature_location/leader_end（直接载入 point13/14，与 JSON 侧同口径）。
-// DIMENSION 走显式组码字段，无 dimSpecificLayout 位流布局问题；
-// dimstyle 名（组码 3）与匿名块名（组码 2）无句柄对应，不恢复句柄引用。
+// buildDimension 按组码 70 的低三位选择标注类型，并读取公共参数和定义点。
+// 组码 10、11、12 分别载入定义点、文字中点和克隆插入点；13–16 由类型
+// 决定具体含义。角度从度转换为弧度。
+// 匿名块名通过块表解析，前向引用由文档解析结束后的链接步骤补齐；
+// 此处不根据组码 3 恢复标注样式句柄。
 func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 	d := &entity.EntDimension{BaseEntity: *base}
 	d.AnonymousBlock = st.BlockByName[rec.str(2)]
 	d.Extra = map[string]any{"dxf_block_name": rec.str(2)}
 	flag, _ := rec.intVal(70)
 	d.DimFlag = uint8(flag & 0xFF)
-	d.DimFlags = d.DimFlag // DXF 无独立 flag1 位流，审计口径以 flag 为准
+	d.DimFlags = d.DimFlag // DXF 无独立 flag1 位流，审计规则以 flag 为准
 	sub := d.DimFlag & 0x7
-	// 公共段
-	// 10 组码恒为 def 点（DWG 侧 point10 载体，含 ANG2LN——gold 仲裁：
-	// ex2000 h=43B 的 DXF 10 与 gold xline2end_pt 一致，16 与 def_pt 一致）
+	// 读取组码 10 的定义点及公共文字定位参数。
 	d.Point10 = rec.point3(10)
 	d.TextMidpoint = rec.point3(11)
 	if el, ok := rec.floatVal(31); ok {
@@ -1300,8 +1282,7 @@ func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 		d.HasPoint15 = true
 	}
 	if sub == 2 && len(rec.all(16)) > 0 {
-		// ANG2LN 子类段的 16（2RD，16/26）为 gold def_pt 载体（DWG 位流
-		// 尾部 2RD，即解码侧 point16x/p16y 字段）
+		// ANG2LN 的组码 16/26 保存二维定义点，对应 Point16x 和 P16y。
 		if p, ok := rec.first(16); ok {
 			d.Point16x = p.floatValue()
 		}
@@ -1321,7 +1302,7 @@ func (st *DxfState) buildDimension(rec *DxfRec, base *entity.BaseEntity) any {
 // （98 计数 + 10/20 点对，其后 10/20 不再属路径）→ 渐变段（450 标志/451
 // 保留/460 角度（度，入库转弧度）/461 偏移/452 单色标志/462 tint/453 色数/
 // 463+63/421 逐色三元组/470 渐变名）。
-// 边界细分点列与 DWG/JSON 来源同口径（多段线带凸度细分，边集直线段拼接，
+// 边界细分点列与 DWG/JSON 来源采用相同规则（多段线带凸度细分，边集直线段拼接，
 // 弧段保留原始参数）。
 func (st *DxfState) buildHatch(rec *DxfRec, base *entity.BaseEntity) any {
 	h := &entity.EntHatch{BaseEntity: *base}
@@ -1435,7 +1416,7 @@ func (st *DxfState) buildHatch(rec *DxfRec, base *entity.BaseEntity) any {
 		case 92:
 			flg := uint32(p.floatValue())
 			h.Paths = append(h.Paths, entity.HatchPath{Flag: flg, IsPolyline: flg&2 != 0})
-			// has_derived 为各路径 flag bit2 的或（in_dxf 口径），置位时
+			// has_derived 为各路径 flag bit2 的或（in_dxf 规则），置位时
 			// 读者期待随后的 47 像素尺寸
 			h.HasDerived = h.HasDerived || flg&4 != 0
 			curPath = len(h.Paths) - 1
@@ -1571,7 +1552,7 @@ func (st *DxfState) buildHatch(rec *DxfRec, base *entity.BaseEntity) any {
 		case 453:
 			curColor = -1 // 色数声明后三元组游标归零
 		case 460:
-			// DXF 渐变角度为度，DWG 位流/模型侧为弧度（in_dxf deg2rad 同款）
+			// DXF 渐变角度为度，DWG 位流/模型侧为弧度（in_dxf deg2rad 相同）
 			h.GradientAngle = p.floatValue() * math.Pi / 180
 		case 461:
 			h.GradientShift = p.floatValue()
@@ -1596,7 +1577,7 @@ func (st *DxfState) buildHatch(rec *DxfRec, base *entity.BaseEntity) any {
 			h.GradientName = p.strValue()
 		}
 	}
-	// 细分点列（渲染）：与 JSON 构造同口径
+	// 生成渲染所需的细分点列，与 JSON 构造使用相同规则。
 	for i := range h.Paths {
 		pa := &h.Paths[i]
 		if pa.IsPolyline {
@@ -1799,22 +1780,17 @@ func (st *DxfState) buildMLine(rec *DxfRec, base *entity.BaseEntity) any {
 	return m
 }
 
-// buildMLeader MULTILEADER：270 版本 + 300 CONTEXT_DATA{...}301 上下文段
-// + 301 后顶层尾段（340 样式句柄、90 override 掩码、170 类型、91 线色、
-// 341 线型、171 线宽、290/291 落地/狗腿、41 落地距、342/42 箭头、172 内容
-// 样式、343 文字样式、173/95/174/175 文字对齐组、92 文字色、292 边框、
-// 344/93/10/43 块内容、176/293 附属/注释性、294/178/179/45 负向/对齐/
-// 比例、271/273/272/295 R2010+ 附着组）。组码对照 dwg2.spec MULTILEADER
-// 的 DXF 标注与 in_dxf.c add_MULTILEADER。上下文段解析顶层标量、文字
-// 内容与 302 LEADER{...} 引线骨架（点列/狗腿/断开），LEADER_LINE 段读
-// 点列与线索引；块内容（296 起）结构深且渲染不消费，跳过。
+// buildMLeader 从 DXF 组码构造多重引线实体。
+// 先解析 CONTEXT_DATA 中的引线节点、引线段及文字或块内容，再读取
+// 上下文以外的样式、颜色和句柄字段。块内容包括定义引用、插入变换
+// 与矩阵；不支持的组码忽略，不能据此推定所有专用数据均已恢复。
 func (st *DxfState) buildMLeader(rec *DxfRec, base *entity.BaseEntity) any {
 	m := &entity.EntMLeader{BaseEntity: *base}
 	if v, ok := rec.intVal(270); ok {
 		m.HasVersion = true
 		m.ClassVersion = uint16(v)
 	}
-	// ---- 上下文段（300 CONTEXT_DATA{ 到 301 }）----
+	// 上下文段（300 CONTEXT_DATA{ 到 301 }）。
 	inCtx := false
 	inLeader := false // 302 LEADER{ 到 303 }
 	inLine := false   // 304 LEADER_LINE{ 到 305 }
@@ -2061,7 +2037,7 @@ func (st *DxfState) buildMLeader(rec *DxfRec, base *entity.BaseEntity) any {
 			}
 		}
 	}
-	// ---- 顶层尾段（301 } 之后；二次扫描跳过上下文段内同名组码）----
+	// 顶层尾段（301 } 之后；二次扫描跳过上下文段内同名组码）。
 	tail := false
 	for _, p := range rec.pairs {
 		switch p.Code {
@@ -2279,9 +2255,9 @@ func (st *DxfState) buildViewport(rec *DxfRec, base *entity.BaseEntity) any {
 
 // buildAcis REGION/3DSOLID/BODY：SAT 文本行拼接建模。
 // DXF 组码 1/3 行为加密态 SAT（每行一个组码，code 1 行尾补换行），
-// 按码值逐行拼接后做 in_dxf 同款解密（'^ ' 还原为明文 'A'，其余字节
+// 按码值逐行拼接后做 in_dxf 相同解密（'^ ' 还原为明文 'A'，其余字节
 // b≤32 保留、否则 159-b）得 acisData；290 acis_empty/70 version 一并
-// 消费。几何内核不在解析范围，与 DWG 侧 entAcis 同构。
+// 消费。几何内核不在解析范围，与 DWG 侧 EntAcis 同构。
 func (st *DxfState) buildAcis(rec *DxfRec, base *entity.BaseEntity) any {
 	a := &entity.EntAcis{BaseEntity: *base, Kind: rec.Typ}
 	if v, ok := rec.intVal(290); ok {
@@ -2321,7 +2297,7 @@ func (st *DxfState) buildAcis(rec *DxfRec, base *entity.BaseEntity) any {
 	return a
 }
 
-// ---- 词法层 ----
+// 词法层。
 
 // dxfValKind 组码值的语义类型（对齐 dwg_resbuf_value_type）。
 type dxfValKind int
@@ -2430,7 +2406,7 @@ type dxfPair struct {
 // strValue 字符串值（句柄类返回原文）。
 func (p dxfPair) strValue() string { return p.s }
 
-// floatValue 数值（字符串类解析失败为 0，与 LibreDWG 的容错口径一致）。
+// floatValue 数值（字符串类解析失败为 0，与 LibreDWG 的容错规则一致）。
 func (p dxfPair) floatValue() float64 { return p.num }
 
 // dxfLexer 组码对流：ASCII 与二进制两种编码的统一读取游标。
@@ -2626,17 +2602,16 @@ func (l *dxfLexer) readBinValue(p *dxfPair) error {
 		if dxfValueType(p.Code) == dxfValReal {
 			p.num, _ = strconv.ParseFloat(p.s, 64)
 		} else {
-			p.s = l.decodeText(raw) // R12 系按码页解码（与 ASCII 路径同口径）
+			p.s = l.decodeText(raw) // R12 文本按码页解码，与 ASCII 路径使用相同规则。
 		}
 	}
 	return nil
 }
 
-// fillValue 填充 ASCII 值：数值类组码立即解析（解析失败保留 0，与
-// LibreDWG strtod 失败返回 NaN 的容错口径一致，不视为文件损坏）；
-// 字符串类按词法层码页解码（R12 系 GBK 等，先码页后转义——GBK 第二
-// 字节可含 ^ 字符，先转义会误改字节流），再还原 ^J/^M 转义（写出端
-// cquote 的逆过程）。
+// fillValue 按组码类型解析 ASCII 值。
+// 数值使用 strconv.ParseFloat，并忽略其错误：语法错误通常留下零值，
+// 溢出可能得到无穷值。文本先按码页解码，再还原 ^J/^M 等转义，避免
+// 将多字节编码中的字节误判为转义符。
 func (l *dxfLexer) fillValue(p *dxfPair, raw string) {
 	switch dxfValueType(p.Code) {
 	case dxfValReal, dxfValInt16, dxfValInt8, dxfValBool, dxfValInt32, dxfValInt64:

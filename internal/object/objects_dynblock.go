@@ -1,9 +1,9 @@
-// 本文件实现动态块族内部对象（dwg2.spec）：AcDbBlockElement（基于
-// AcDbEvalExpr）、BlockGrip/BlockParameter/BlockAction/Block2Pt/1Pt
-// 参数、ParamValueSet 等公共体，及 BLOCK*GRIP、BLOCK*PARAMETER、
-// BLOCK*ACTION、BLOCKREPRESENTATION、DYNAMICBLOCKPURGEPREVENTER。
-// 注意 gold JSON（out_json _path_field）会把 "xxx[i].field" 键剥为
-// "field"（同名重复键后写覆盖），连接点的 code/name 即此口径。
+// 本文件解析动态块的参数、夹点、动作和表示对象。
+//
+// 解析器复用块元素、块参数和块动作的公共字段读取逻辑，并保存各类型
+// 的专用字段及句柄引用。字段键与诊断导出的命名约定保持一致。
+//
+// 格式参考：LibreDWG dwg2.spec 中的动态块对象定义。
 
 package object
 
@@ -14,7 +14,7 @@ import (
 	"github.com/boyunsz/go-cad/internal/objrec"
 )
 
-// setFieldTop 按 gold JSON 的重复键覆盖语义写字段：同名键已存在时
+// setFieldTop 按 参考 JSON 的重复键覆盖语义写字段：同名键已存在时
 // 覆盖（保持位置不变）。
 func (g *ObjGeneric) setFieldTop(f ObjField) {
 	for i := len(g.Fields) - 1; i >= 0; i-- {
@@ -45,7 +45,7 @@ func (f *GfRead) Point3RD(key string, g *ObjGeneric) error {
 }
 
 // readBlockConnectionPts 读 BlockAction_ConnectionPts 向量：code/name
-// 均写顶层覆盖键（gold JSON 重复键后写覆盖，最终 name=最后一个连接点
+// 均写顶层覆盖键（参考 JSON 重复键后写覆盖，最终 name=最后一个连接点
 // 的 name、code=最后一个连接点的 code）。
 func readBlockConnectionPts(R *bitstream.BitStream, fr *GfRead, g *ObjGeneric, n int) error {
 	for i := 0; i < n; i++ {
@@ -227,7 +227,7 @@ func decodeBlock1PtParameterFields(R *bitstream.BitStream, Ver container.DwgVers
 
 // decodeBlockParamValueSet AcDbBlockParamValueSet_fields：desc T +
 // flags BL + minimum/maximum/increment BD + num_valuelist BS +
-// valuelist BD 向量（gold 无 num_valuelist 键，仅消费位）。
+// valuelist BD 向量（参考 JSON 无 num_valuelist 键，仅消费位）。
 func decodeBlockParamValueSet(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	if err := fr.T("desc", g); err != nil {
 		return err
@@ -296,7 +296,7 @@ func decodeBlockActionDoublesFields(R *bitstream.BitStream, Ver container.DwgVer
 	return nil
 }
 
-// ---- 各具体对象 ----
+// 各具体对象。
 
 // decodeGenericBLOCKVISIBILITYGRIP 等纯 Grip 类（LOOKUP/ROTATION/XY
 // 同布局无附加字段）。

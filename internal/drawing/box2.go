@@ -1,5 +1,8 @@
-// box2.go 世界坐标包围盒与稳健边界估计：离散图元的包围盒合并、
-// 中位数稳健取界，供渲染视口与 DXF 头图幅字段共用。
+// 本文件提供世界坐标下的二维包围盒计算和稳健范围估计。
+//
+// 包围盒用于合并图元范围；稳健估计用于减少异常坐标对视口的影响。
+// 计算结果供渲染视口选择和 DXF 图幅范围导出使用。
+
 package drawing
 
 import (
@@ -14,8 +17,7 @@ type Box2 struct {
 	MinX, MinY, MaxX, MaxY float64
 }
 
-// MtextLineFactor MTEXT 缺省行距（linespace_factor 未存储时的历史默认
-// 口径，DXF 44 同源）：包围盒估算与文本渲染共用。
+// MtextLineFactor 是缺少有效 MTEXT 行距系数时使用的默认值，供范围估计和文本渲染共用。
 const MtextLineFactor = 1.66
 
 // Extend 扩展包围盒以包含点。
@@ -136,10 +138,8 @@ func PrimitivesBounds(prims []Primitive) Box2 {
 			// 字形字面上延接近整字高（真实字形路径 ~0.88em），按整高计入
 			// 包围盒，避免贴近视口边缘的文字整体越界被裁
 			b.Extend(p.Lb.X+p.Lb.W/2, p.Lb.Y+p.Lb.H)
-			// MTEXT 块自锚点向下（附着 1-3）/双向（4-6）/向上（7-9）排布，
-			// 按换行行数与行距系数估算块高计入包围盒：墨迹锚定位置修复后
-			// 仅向上扩展整字高不再覆盖下行块（2000/Text.dwg 单 MTEXT 样本
-			// 渲染空实证——块体全部落在锚点下方视口之外）
+			// 根据 MTEXT 附着点和估算块高扩展包围盒：附着点 1–3 向下，
+			// 4–6 向上下两侧，7–9 向上，以覆盖多行文字的预计范围。
 			if p.Lb.Tx != nil && p.Lb.Tx.Attachment != 0 {
 				bh := mtextBlockHeightEstimate(p.Lb.Tx)
 				mid := p.Lb.X + p.Lb.W*cos/2
@@ -182,9 +182,9 @@ func Plausible(x, y float64) bool {
 	return entity.IsFinite(x) && entity.IsFinite(y) && math.Abs(x) < 1e7 && math.Abs(y) < 1e7
 }
 
-// mtextBlockHeightEstimate MTEXT 块高估算（包围盒口径）：按列宽贪心换行的
-// 行数（字符宽 CJK 1.0/其余 0.5 em，与 render 侧换行同口径）与行距系数
-// （DXF 44，未存储按 1.66 缺省行距兜底）估算自块顶到块底的世界高度。
+// mtextBlockHeightEstimate 根据列宽、估算字符宽度和行距计算 MTEXT 的世界坐标高度。
+// 换行估算使用 CJK 字符 1.0 em、其他字符 0.5 em；无有效行距系数时
+// 使用 MtextLineFactor。该值为几何估计，不是实际字体度量。
 func mtextBlockHeightEstimate(tx *GlyphTextInfo) float64 {
 	h := tx.HWorld
 	if h <= 0 {

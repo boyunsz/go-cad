@@ -1,11 +1,10 @@
-// 本文件实现 TABLECONTENT（类 530 后的 TABLE 类族）与 DATATABLE 内部
-// 对象的解码（dwg2.spec DWG_OBJECT(TABLECONTENT)/DWG_OBJECT(DATATABLE)）。
-// TABLECONTENT 主体为 TABLECONTENTs_fields 宏（AcDbLinkedData +
-// AcDbLinkedTableData：cols/rows/cells/cell_contents 嵌套结构），依赖
-// TABLE_value_fields（Dwg_TABLE_value）与 CellStyle_fields/
-// ContentFormat_fields（objects_visual.go 已有）。
-// 全部内嵌句柄（text_style/ltype/data_link/attdef/field_refs/tablestyle
-// 等）在 handle 流，decode 阶段计数 num_content_handles，hdl 阶段按序读。
+// 本文件解析 TABLECONTENT 和 DATATABLE 表格对象。
+//
+// TABLECONTENT 按列、行、单元格和内容层级读取，复用表值、单元格样式
+// 及内容格式读取函数。内嵌引用先在数据解析阶段计数，再按句柄流顺序读取。
+//
+// 格式参考：LibreDWG dwg2.spec 中对应的对象定义。
+
 package object
 
 import (
@@ -138,7 +137,7 @@ func readTableCustomDataItems(R *bitstream.BitStream, fr *GfRead, g *ObjGeneric,
 }
 
 // readTableCellStyle 读取 cellstyle 前缀的 CellStyle_fields（句柄计数
-// 由 readCellStyleFields 内部的 nHdl 自增完成：text_style 与 ltype）。
+// 由 ReadCellStyleFields 内部的 nHdl 自增完成：text_style 与 ltype）。
 func readTableCellStyle(R *bitstream.BitStream, fr *GfRead, g *ObjGeneric, prefix string, nHdl *int) error {
 	return ReadCellStyleFields(R, fr, g, prefix, nHdl)
 }

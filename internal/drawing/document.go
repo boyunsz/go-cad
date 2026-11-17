@@ -1,5 +1,8 @@
-// document.go assembles DWG container records into a drawing document.
-// It preserves source records for geometry, text, rendering, and export.
+// Package drawing 提供图纸文档模型、格式解析和图元转换。
+//
+// DWG、DXF 和 JSON 解析结果统一存入 Document，供文本提取、布局处理、
+// 渲染和导出使用。DWG 解析路径负责记录解码与文档装配，并保留可用的
+// 源记录信息，供诊断和回放式导出使用。
 package drawing
 
 import (
@@ -18,9 +21,9 @@ import (
 	"strings"
 )
 
-// Entity 对外暴露的图元接口（几何访问用于渲染与包围盒计算）。
+// Entity 定义图元的包围盒访问接口。
 type Entity interface {
-	// Geometry 输出图元的描边段（折线近似；弧按弦高离散）与文字占位。
+	// bounds 返回图元的二维包围盒。
 	bounds() Box2
 }
 
@@ -31,52 +34,48 @@ type TextInfo struct {
 	X, Y  float64
 }
 
-// Document 解析完成的 DWG 文档模型。
+// Document 保存 DWG、DXF 或 JSON 解析后的公共图纸模型。
 type Document struct {
 	SourceFile     string
-	Xrefs          map[uint64]*XrefDocument // rendering-only external block bindings; source entities are never merged
-	ObjectFailures map[uint64]string        // internal object decoder failures
+	Xrefs          map[uint64]*XrefDocument // 供渲染使用的外部块绑定，源实体不合并到宿主实体集合。
+	ObjectFailures map[uint64]string        // 按对象句柄记录内部对象解码失败原因。
 	Ver            container.DwgVersion
 	Codepage       uint16
 	ModelSpace     []any                        // 模型空间图元（entmode==2）
 	Blocks         map[uint64][]any             // 块定义：BLOCK_HEADER handle → 块内图元
 	Attribs        map[uint64]*entity.EntAttrib // ATTRIB handle → 属性
 	LayerColors    map[uint64]LayerColor
-	// lightingUnits NOD 字典 LIGHTINGUNITS 条目的 DICTIONARYVAR 值（预扫描
-	// 产物，主循环前探测），=="2" 时 LIGHT 实体按光度分支解码
+	// LightingUnits 保存 NOD 字典中的 LIGHTINGUNITS 值；值为 "2" 时读取光度参数。
 	LightingUnits string
-	// pspaceSpace pre-R13 图纸空间实体（HAS_PSPACE 位，LibreDWG entmode=1）：
-	// pre-R13 的图纸空间实体位于主实体区，与 R13+（图纸空间内容在
-	// blocks 的 PAPER_SPACE 块头内）不同，需要单独存档；不参与模型空间
-	// 渲染，仅保证解码结果可见（审计/对照）。
+	// PspaceSpace 保存 R13 之前版本中带 HAS_PSPACE 标志的图纸空间实体。
+	// 这些实体来自主实体区，与模型空间实体分开保存，供查询和导出使用。
 	PspaceSpace []any
-	// R2013+ 内部对象：命名字典与扩展记录（键 = 对象句柄）
+	// 按对象句柄保存字典和通用内部对象。
 	Dictionaries map[uint64]*object.ObjDictionary
 	InternalObjs map[uint64]*object.ObjGeneric
-	Xrecs        map[uint64]*object.ObjXrecord // LAYER handle → 颜色
+	Xrecs        map[uint64]*object.ObjXrecord // XRECORD 对象句柄与扩展记录的映射。
 	skipped      int                           // 解码失败被跳过的对象数
 	ByHandle     map[uint64]any                // 实体句柄 → 实体对象（审计/round-trip 用）
 	// debugFailures 调试：按句柄记录解码失败原因。
 	debugFailures map[uint64]string
-	// r2000Raw R2000/R13/R14 容器的原始写出素材（段整段字节、对象区整块
+	// R2000Raw R2000/R13/R14 容器的原始写出素材（段整段字节、对象区整块
 	// 字节与对象图条目），仅在对应版本解析路径保留，供 WriteDwgR2000
 	// 做文件级回放写出。
 	R2000Raw *container.R2000RawData
-	// r2004Raw R2004 家族（AC1018~AC1032 同容器）的原始写出素材（头部
+	// R2004Raw R2004 家族（AC1018~AC1032 同容器）的原始写出素材（头部
 	// 字节、页表顺序、段表解压字节与各段解压数据），仅在对应版本解析路径
 	// 保留，供 WriteDwgR2004 做文件级回放写出。
 	R2004Raw *container.R2004RawData
-	// r2007Raw R2007（AC1021）容器的原始写出素材（头部、第二头部 34 字段、
+	// R2007Raw R2007（AC1021）容器的原始写出素材（头部、第二头部 34 字段、
 	// 页表顺序与各段解压数据），仅在 R2007 解析路径保留，供 WriteDwgR2007
 	// 做文件级回放写出。
 	R2007Raw *container.R2007RawData
-	// HeaderVars JSON 输入（dwgread -O JSON）HEADER 段的全量键值（原样
-	// 保存，不逐个建模；键名与 gold 一致，不带 $ 前缀，查询用 HeaderVar
-	// 做 $ 容错）。仅 ParseJSON 路径填充；DWG/DXF 路径的头变量走各自结构。
+	// HeaderVars 保存已读取的头变量，以不带 $ 前缀的字段名作为键。
+	// JSON 导入保存输入 HEADER 字段；DWG 样式头解析保存支持的头变量。
+	// 实际字段覆盖取决于输入格式和解析路径，查询可使用 HeaderVar。
 	HeaderVars map[string]any
-	// extMin/extMax 图幅范围（JSON HEADER EXTMIN/EXTMAX，渲染视口可用）；
-	// insbase 插入基点（INSBASE）；ltscale 全局线型比例（LTSCALE）。
-	// 与 HeaderVars 同源，仅 ParseJSON 路径填充。
+	// ExtMin/ExtMax、Insbase 和 Ltscale 分别保存图幅范围、插入基点和全局线型比例。
+	// 这些字段由 JSON 头变量导入路径填充；其他来源的参数可能位于 HeaderVars。
 	ExtMin, ExtMax entity.Point3
 	Insbase        entity.Point3
 	Ltscale        float64
@@ -100,8 +99,8 @@ func decodeInternalObjectOK(typeCode uint16, className string) bool {
 	if typeCode == 0x2B || className == "ACDBDICTIONARYWDFLT" || className == "DICTIONARYWDFLT" {
 		return true
 	}
-	// UNKNOWN_OBJ 兜底：类类型（≥500）且无专门解码器的对象，
-	// LibreDWG 同样以 UNKNOWN_OBJ 兜底（仅记录 unknown_bits）
+	// UNKNOWN_OBJ 回退：类类型（≥500）且无专门解码器的对象，
+	// LibreDWG 同样以 UNKNOWN_OBJ 回退（仅记录 unknown_bits）
 	if typeCode >= 500 || className == "UNKNOWN_OBJ" || className == "ACDBASSOCPERSSUBENTMANAGER" {
 		return true
 	}
@@ -276,7 +275,7 @@ func (d *Document) decodeObjects(fileData []byte) error {
 			continue
 		}
 		name := objrec.EntityTypeName(h.TypeCode, dynamicTypes)
-		// 实体判定优先（WIPEOUT/LIGHT 等实体类不再被 UNKNOWN 对象兜底截走）
+		// 实体判定优先（WIPEOUT/LIGHT 等实体类不再被 UNKNOWN 对象回退截走）
 		if name == "" || !objrec.IsEntityType(h.TypeCode, dynamicTypes) {
 			if decodeInternalObjectOK(h.TypeCode, name) {
 				r := rec.BodyBitStream()
@@ -298,7 +297,7 @@ func (d *Document) decodeObjects(fileData []byte) error {
 		r := rec.BodyBitStream()
 		r.SetBitPos(h.DataStartBit)
 		if IsVersionedEntityKind(name) {
-			// ACIS 系/WIPEOUT：版本感知专用解码（纳管进 entityByHandle）
+			// ACIS 系/WIPEOUT：版本感知专用解码（纳管进 ByHandle）
 			ent, err := DecodeVersionedEntity(r, h, ref.Handle, name, d.Ver)
 			if err != nil {
 				d.FailBy(ref, fmt.Errorf("%s: %w", name, err))
@@ -400,16 +399,12 @@ func (d *Document) LoadDynamicTypes(fileData []byte) (map[uint16]string, error) 
 	return container.ParseClassesSection(data, d.Ver)
 }
 
-// EnsureFixedEntityTypes 补录 objTypeCode 静态表缺失的固定实体类型码
-// （REGION=0x25/3DSOLID=0x26/BODY=0x27、HATCH=0x4E 在 R2000+ 为固定码但
-// 静态表未收录；OLEFRAME=0x2B/OLE2FRAME=0x4A 为固定码），使 entityTypeName
-// 与 isEntityType 能将这些对象路由到实体解码器而非静默跳过。仅在动态类名表
-// 无同名映射时注入，不覆盖类段解析结果。dynamic 可为 nil（CLASSES 段
-// 损坏时类表不可用），此时自建映射保证固定类型码解码不受影响。
+// EnsureFixedEntityTypes 在 dynamic 中补充已知固定实体类型码，保留已有映射。
+// 调用方须提供非 nil 映射才能获得新增条目；传入 nil 时，函数仅在内部
+// 创建临时映射，不会将其返回或写回调用方。
 func EnsureFixedEntityTypes(dynamic map[uint16]string) {
 	if dynamic == nil {
-		// CLASSES 段损坏（变异/畸形输入）时类表为 nil，自建映射
-		// 继续注入固定类型码（批次 Q/T 模糊测试实证 nil 直接写会 panic）
+		// 避免向 nil 映射写入；此处创建的映射仅在本次调用内有效。
 		dynamic = map[uint16]string{}
 	}
 	fixed := map[uint16]string{
@@ -430,7 +425,7 @@ func EnsureFixedEntityTypes(dynamic map[uint16]string) {
 
 // IsVersionedEntityKind 判断实体类型是否需要版本感知的专用解码路径
 // （ACIS 系与 WIPEOUT：entities.go 的类型分发无对应版本参数，由 cad.go
-// 特判调用 decodeAcisVer/decodeWipeoutVer 后纳入 entityByHandle）。
+// 特判调用 DecodeAcisVer/DecodeWipeoutVer 后纳入 ByHandle）。
 func IsVersionedEntityKind(name string) bool {
 	switch name {
 	case "REGION", "3DSOLID", "BODY", "WIPEOUT", "TOLERANCE", "VIEWPORT":
@@ -439,7 +434,7 @@ func IsVersionedEntityKind(name string) bool {
 	return false
 }
 
-// DecodeVersionedEntity 版本感知实体的扫描解码：与 decodeEntityFieldsVer
+// DecodeVersionedEntity 版本感知实体的扫描解码：与 DecodeEntityFieldsVer
 // 同一候选扫描框架，主体解码按类型分发到 ACIS 系/WIPEOUT 专用解码器。
 func DecodeVersionedEntity(r *bitstream.BitStream, h objrec.ObjHeader, objHandle uint64, typeName string, ver container.DwgVersion) (any, error) {
 	dataEnd := h.Rec.DataEndBit()
@@ -693,7 +688,7 @@ func parseR2000Document(data []byte) (*Document, error) {
 		r := rec.BodyBitStream()
 		r.SetBitPos(h.DataStartBit)
 		if IsVersionedEntityKind(name) {
-			// ACIS 系/WIPEOUT：版本感知专用解码（纳管进 entityByHandle）
+			// ACIS 系/WIPEOUT：版本感知专用解码（纳管进 ByHandle）
 			ent, err := DecodeVersionedEntity(r, h, ref.Handle, name, doc.Ver)
 			if err != nil {
 				doc.FailBy(ref, fmt.Errorf("%s: %w", name, err))
@@ -788,7 +783,7 @@ func DebugLines(data []byte) map[uint64][6]float64 {
 	return out
 }
 
-// ---- 对照诊断导出：与参考实现输出做逐字段对比用 ----
+// 对照诊断导出：与参考实现输出做逐字段对比用。
 
 // DumpEntityRow 单个实体的对照字段（键名与参考实现对齐）。
 type DumpEntityRow struct {
@@ -797,10 +792,9 @@ type DumpEntityRow struct {
 	DXF    map[string]any `json:"dxf"`
 }
 
-// dumpEntityCommonKeys 全实体公共键序列（批次 B 全键对齐：entity/handle/
-// type 公共头标量 + color 嵌套系 + 句柄系 + EED 展平对；[i] 为数组占位，
-// 由 expandAuditKeys 按实体实际数组长度展开，条件缺省键经 entityField
-// 返回 nil 自动跳过——与 gold 条件输出语义一致）。
+// dumpEntityCommonKeys 定义实体公共诊断字段及其输出顺序。
+// 数组占位符 [i] 由 expandAuditKeys 按实际长度展开；EntityField 返回
+// nil 的条件字段不输出。
 var dumpEntityCommonKeys = []string{
 	"entity", "handle", "type", "entmode", "bitsize", "size",
 	"color", "color.index", "color.rgb", "color.flag",
@@ -815,10 +809,9 @@ var dumpEntityCommonKeys = []string{
 	"eed[i].code", "eed[i].size", "eed[i].value",
 }
 
-// entityGoldKeys gold entity 名 → per-type 键序列（对齐 out_json 键集；
-// [i] 数组占位同公共键。本库未建模的键不列入——VIEWPORT 子对象句柄组、
-// SPLINE tan 向量、MTEXT 背景长尾、acis_data 数组（roundtrip 字节对照
-// 覆盖）等，见测试豁免清单）。
+// entityGoldKeys 定义各实体类型的诊断字段及其输出顺序。
+// 数组占位符 [i] 按实际长度展开；字段值由 EntityField 提供，未支持
+// 或不适用于当前实体的字段不输出。
 var entityGoldKeys = map[string][]string{
 	"LINE":    {"start", "end", "thickness", "extrusion", "z_is_zero"},
 	"CIRCLE":  {"center", "radius", "thickness", "extrusion"},
@@ -974,7 +967,7 @@ var entityGoldKeys = map[string][]string{
 }
 
 // dimGoldKeys DIMENSION 族公共键序列（点组/句柄系 + spec 标量全键；
-// 类型专属键由 entityField 按类型名返回 nil 自动跳过）。
+// 类型专属键由 EntityField 按类型名返回 nil 自动跳过）。
 func dimGoldKeys() []string {
 	return []string{
 		"class_version", "elevation", "extrusion", "def_pt", "text_midpt",
@@ -1009,8 +1002,8 @@ func acisGoldKeys() []string {
 }
 
 // expandAuditKeys 展开键模式表：含 [i]/[j]/[k] 占位的模式按实体实际
-// 数组长度递归展开（占位下标从 0 递增，以 entityField 返回 nil 终止，
-// 与 gold 条件输出语义一致）；宿主键形态（父层占位无直接值，如
+// 数组长度递归展开（占位下标从 0 递增，以 EntityField 返回 nil 终止，
+// 与 参考 JSON 条件输出语义一致）；宿主键形态（父层占位无直接值，如
 // paths[i].segs[j].*）以内层首个展开值判定非空。
 func expandAuditKeys(ent any, patterns []string) []string {
 	var out []string
@@ -1094,11 +1087,9 @@ func (d *Document) commonDXF(base *entity.BaseEntity) map[string]any {
 	}
 }
 
-// DumpEntities 输出模型空间全部实体的对照 JSON（handle/type/字段），
-// 用于与参考实现输出做逐字段一致性对比。字段覆盖：dxf 覆盖
-// out_json 公共键 + per-type 键（几何数组/颜色嵌套/EED/句柄系），值
-// 经 entityField 统一导出，另保留本库自有口径键（text/insert 等）供
-// 既有消费方使用。
+// DumpEntities 解析输入 DWG，并将模型空间实体导出为字段级诊断 JSON。
+// 字段包括类型、句柄、几何、颜色、扩展数据和引用信息；同时保留本库
+// 已有的 text、insert 等字段，供下游查询使用。
 func DumpEntities(data []byte) (string, error) {
 	doc, err := Parse(data)
 	if err != nil {
@@ -1107,13 +1098,12 @@ func DumpEntities(data []byte) (string, error) {
 	return dumpEntities(doc)
 }
 
-// DumpEntitiesDoc 文档级对照导出：ParseJSON 等外部构造的文档与 Parse
-// 同口径（JSON 输入长尾段的输出对照入口）。
+// DumpEntitiesDoc 导出已构造文档中的实体字段，支持 DWG、DXF 和 JSON 解析结果。
 func DumpEntitiesDoc(doc *Document) (string, error) {
 	return dumpEntities(doc)
 }
 
-// dumpEntities 文档级导出主体：模型空间实体逐个展开 gold 键 + 自有键。
+// dumpEntities 文档级导出主体：模型空间实体逐个展开 参考字段 + 自有键。
 func dumpEntities(doc *Document) (string, error) {
 	rows := make([]DumpEntityRow, 0, len(doc.ModelSpace)+len(doc.Blocks)+64)
 	for _, ent := range doc.ModelSpaceEntities() {
@@ -1166,12 +1156,11 @@ func sanitizeJSONFloats(v any) any {
 	}
 }
 
-// dxfOf 组装实体与参考实现对齐的字段集：gold 全键（entityGoldKeys +
-// 公共键序列）经 entityField 导出，另保留本库自有口径键（text/insert/
-// xscale 等既有消费方依赖）。
+// dxfOf 汇总实体诊断字段。
+// 参考字段由 EntityField 提取，同时保留 text、insert、xscale 等本库字段。
 func dxfOf(d *Document, ent any, base *entity.BaseEntity) map[string]any {
 	dxf := d.commonDXF(base)
-	// gold 全键：公共序列 + per-type 序列（[i] 占位按实体数组展开）
+	// 按公共字段和实体专用字段序列提取诊断值，数组占位符按实际长度展开。
 	keys := make([]string, 0, len(dumpEntityCommonKeys)+48)
 	seen := map[string]bool{}
 	add := func(k string) {
@@ -1193,7 +1182,7 @@ func dxfOf(d *Document, ent any, base *entity.BaseEntity) map[string]any {
 			dxf[k] = v
 		}
 	}
-	// 自有口径键（既有消费方：文本提取一致性、几何渲染消费）
+	// 保留文本提取和几何查询使用的本库字段。
 	switch e := ent.(type) {
 	case *entity.EntLine:
 		dxf["start"] = p3slice(e.Start)
@@ -1283,8 +1272,8 @@ func (d *Document) ModelSpaceEntities() []any {
 	return out
 }
 
-// DebugScanGoldLines 调试用：扫描全部原始对象图条目，
-// 找出解码后坐标与 gold 匹配的 LINE 记录及其句柄/偏移。
+// DebugScanGoldLines 扫描原始对象记录，查找坐标与给定参考线段匹配的 LINE。
+// 返回匹配记录的句柄和偏移，供解析诊断使用。
 func DebugScanGoldLines(data []byte, gold map[uint64][6]float64) []string {
 	objectsData, err := container.LoadNamedSectionData(data, "AcDb:AcDbObjects")
 	if err != nil {
@@ -1343,7 +1332,7 @@ func (d *Document) DebugLayerColors() map[uint64]string {
 }
 
 // DebugObjectBody 调试用：导出指定句柄对象的原始 body 位流与起始位偏移
-// （bodyBitOffset 为 MS 字段结束处在首字节内的位偏移，用于位级对账）。
+// （BodyBitOffset 为 MS 字段结束处在首字节内的位偏移，用于位级对账）。
 func DebugObjectBody(data []byte, handle uint64) (body []byte, bitOffset uint64, err error) {
 	objectsData, err := container.LoadNamedSectionData(data, "AcDb:AcDbObjects")
 	if err != nil {

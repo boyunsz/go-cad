@@ -1,5 +1,8 @@
-// tessellate.go expands block instances and converts entities into world-space
-// primitives shared by rendering and drawing-bound calculations.
+// 本文件将图纸实体转换为世界坐标下的公共图元。
+//
+// 转换过程包括块引用展开、插入变换、曲线离散和文本几何描述生成。
+// 输出的 Primitive 供渲染和图纸范围计算共用。
+
 package drawing
 
 import (
@@ -39,7 +42,7 @@ type GlyphTextInfo struct {
 	VAlign                 uint16   // 垂直对齐（0 基线/1 下/2 中/3 上）
 	Attachment             uint16   // MTEXT 附着点 1-9（0=单行文本语义）
 	RectWidth              float64  // MTEXT 列宽（世界单位，0=不换行）
-	LineFactor             float64  // MTEXT 行距系数（DXF 44 linespace_factor；≤0=未存储，绘制侧按缺省行距兜底）
+	LineFactor             float64  // MTEXT 行距系数（DXF 44 linespace_factor；≤0=未存储，绘制侧按缺省行距回退）
 	WidthFactor            float64  // TEXT/ATTRIB entity width or MTEXT STYLE base width
 	Oblique                float64  // 倾斜角，单位为弧度
 }
@@ -190,9 +193,8 @@ func (ts *Tessellator) BuildVertexIndex() {
 	}
 }
 
-// ExpandAll 展开模型空间全部图元。
-// pre-R13 图纸空间实体（pspaceSpace，R13+ 无此列表）一并展开：
-// 图纸空间布局文件（如 ACEB10）的主内容位于该列表，跳过会渲染空白。
+// ExpandAll 展开模型空间实体及其块引用。
+// R13 之前版本另存于 PspaceSpace 的图纸空间实体也参与展开。
 func (ts *Tessellator) ExpandAll() []Primitive {
 	ts.BuildVertexIndex()
 	// 展开结果数下界为直属实体数（INSERT 递归展开再按需增长），
@@ -285,13 +287,9 @@ func (ts *Tessellator) appendEntity(out []Primitive, ent any, t Xform, depth int
 			out = append(out, Primitive{Kind: 0, Strokes: strokes, Color: e.Color, Layer: e.Layer, Kind0: "HATCH"})
 		}
 	case *entity.EntDimension:
-		// 标注的真实图形保存在匿名块（*Dxx，AnonymousBlock 引用）中：
-		// 尺寸线、界线、箭头与标注文字均已由 CAD 在保存时算好，AutoCAD
-		// 共享该块的克隆标注还需应用 clone_ins_pt，再进入所属 INSERT。
-		// 该偏移不能套到已经位于定义坐标的简化兜底上。按 INSERT
-		// 同款路径展开匿名块，替代早期「测量点+文字中点连线」的简化
-		// 表达——后者在真实图纸（如机械图标注密集处）会产生横贯图面的
-		// 错误飞线。无块或空块时保留简化表达兜底，保证标注始终可见。
+		// 优先展开标注的匿名块，以保留尺寸线、界线、箭头和文字布局。
+		// 匿名块应用克隆插入偏移，再进入所属 INSERT 变换；简化几何已经位于
+		// 定义坐标，不重复应用该偏移。缺少可用匿名块时使用简化表示。
 		if e.AnonymousBlock != 0 {
 			if inner := ts.Doc.Blocks[e.AnonymousBlock]; len(inner) > 0 {
 				picture := t
@@ -406,7 +404,7 @@ func (ts *Tessellator) appendEntity(out []Primitive, ent any, t Xform, depth int
 		out = append(out, Primitive{Kind: 0, Strokes: strokes, Color: e.Color, Layer: e.Layer, Kind0: "POLYLINE_3D"})
 	case *entity.EntInsert:
 		// 环检测：展开路径上已出现同一块定义即自引用/互引用环，短路该
-		// 分支（环分支不消耗预算，预算只对无环的巨量展开兜底）
+		// 分支（环分支不消耗预算，预算只对无环的巨量展开回退）
 		for _, h := range ts.insPath {
 			if h == e.BlockHeader {
 				return out
@@ -438,8 +436,7 @@ func (ts *Tessellator) appendEntity(out []Primitive, ent any, t Xform, depth int
 // text 携带剥离格式码后的文本内容、anchor 携带水平锚点（RenderSVG 矢量
 // 输出用；PNG 路径仅消费几何字段，文本为空时 SVG 退化为占位框）。
 func (ts *Tessellator) TextLabel(x, y, h, rot float64, nChars int, t Xform, e entity.EntityCommon, kind, text string, anchor uint8) Primitive {
-	// %% 特殊码在显示层统一翻译（解码数据保持原样，值级对齐口径不受
-	// 影响）：%%c→φ 等翻译后字符数变化，占位宽度按翻译后 rune 数校正
+	// 将 %% 控制码转换为显示字符，并按转换后的字符数估算占位宽度；源文本保持不变。
 	if expanded := expandPercentCodes(text); expanded != text {
 		text = expanded
 		if n := utf8.RuneCountInString(text); n > 0 {
@@ -477,14 +474,13 @@ func textWidthFactor(wf float64) float64 {
 	return wf
 }
 
-// TextLabelWith 在 textLabel 占位几何基础上附真实字形版式信息与 SVG 文本
+// TextLabelWith 在 TextLabel 占位几何基础上附真实字形版式信息与 SVG 文本
 // 内容。推进/字面向上基向量按实体变换差分获得（世界单位，INSERT 负缩放
 // 镜像下方向精确），render_text.go 据此换算像素版式绘制真实字形；text/
 // anchor 供 RenderSVG 的 <text> 元素消费；handle 附源实体句柄
 // （<text data-h> AI 元数据）。
 func (ts *Tessellator) TextLabelWith(x, y, h, rot float64, nChars int, t Xform, e entity.EntityCommon, kind string, tx GlyphTextInfo) Primitive {
-	// %% 特殊码显示层翻译：Lines 与 Label.Text 同源应用，保证 PNG 字形
-	// 与 SVG/文本提取口径一致（解码数据保持原样，值级对齐不受影响）
+	// 对 Lines 和 Label.Text 使用相同的显示文本转换，源实体文本保持不变。
 	for i, line := range tx.Lines {
 		tx.Lines[i] = expandPercentCodes(line)
 	}
@@ -559,8 +555,8 @@ func TessCircle(cx, cy, r float64, t Xform) []Stroke {
 // TessArc 圆弧按 3°/段离散（跨零角处理）。span 用取模归一化：
 // 错位解码可能产生 1e48 量级的角度差，逐次减 2π 的循环会退化为亿年级死循环。
 func TessArc(cx, cy, r, a0, a1 float64, t Xform) []Stroke {
-	// 变异输入可产生 NaN/Inf 角度（错位解码实证）：Mod 后 span 仍为 NaN
-	// 会导致 segments 计算溢出为负，make cap panic，须先做有限性防御
+	// 先检查角度是否为有限值，避免 NaN 或无穷值进入取模和分段数计算，
+	// 导致切片容量无效。
 	if !entity.IsFinite(a0) || !entity.IsFinite(a1) || !entity.IsFinite(cx) || !entity.IsFinite(cy) || !entity.IsFinite(r) {
 		return nil
 	}
@@ -641,7 +637,7 @@ func TessLwPolyline(e *entity.EntLwPolyline, t Xform) []Stroke {
 	return out
 }
 
-// ---- 光栅画布 ----
+// 光栅画布。
 
 // TessSpline 样条曲线细分：拟合点模式用向心 Catmull-Rom 平滑；
 // 控制点模式用 De Boor 递推按节点向量求值（度数 ≤ 3 时精确）。

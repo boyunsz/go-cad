@@ -1,7 +1,9 @@
-// 本文件实现设置类内部对象（dwg2.spec/dwg.spec）：FIELD（AcDbField +
-// TABLE_value_fields）、GEODATA（R2010+ 布局）、SECTION_MANAGER/
-// SECTION_SETTINGS（SectionTypeSettings/GeometrySettings 树）、
-// PLOTSETTINGS（AcDbPlotSettings）。
+// 本文件解析字段、地理数据、剖切、打印及引线上下文设置对象。
+//
+// 解析器处理各对象的版本分支、嵌套设置和引用关系，结果存入 ObjGeneric。
+// 通用表值读取逻辑由相关对象解析器复用。
+//
+// 格式参考：LibreDWG 的 dwg.spec 和 dwg2.spec。
 
 package object
 
@@ -24,18 +26,14 @@ func tableValueDataTypeKnown(dt int64) bool {
 	return false
 }
 
-// hexUpper 字节串转大写 hex（gold JSON 的 BINARY 键导出形态，
-// multileaders FIELD value.data_date 实证 'D6070C00...'）。
+// hexUpper 将字节序列编码为大写十六进制字符串。
 func hexUpper(b []byte) string {
 	return strings.ToUpper(hex.EncodeToString(b))
 }
 
-// decodeTableValueFields 读 TABLE_value_fields（前缀如 "value."）：
-// R2007+ 先 format_flags BL；data_type BL（R2000 清 0x200 位）+ 按
-// 类型读 data_long/data_double/data_string 等。返回 data_type。
-// data_type 不在 LibreDWG switch 全集（multileaders FIELD childval[1]
-// 实证读出 1342603270）时对齐其 default 分支：format_flags/data_type
-// 重置为 0 并按 kUnknown 输出 data_long=0，位流照旧推进到 unit_type。
+// decodeTableValueFields 读取 TABLE_value_fields，并返回数据类型。
+// 按类型读取数值、文本或二进制载荷；R2007 及之后版本先读取格式标志。
+// 遇到不支持的数据类型时重置类型和格式标志，写入零值，再继续读取单位等字段。
 func decodeTableValueFields(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric, prefix string) (int64, error) {
 	var formatFlags int64
 	if Ver >= container.VerR2007 {
@@ -53,14 +51,12 @@ func decodeTableValueFields(R *bitstream.BitStream, Ver container.DwgVersion, fr
 	if Ver < container.VerR2007 {
 		dataType &^= 0x200 // PRE R_2007a：清除 0x200 位
 	}
-	// LibreDWG dwg_spec_shared.h TABLE_value_fields：R2007+ 且
-	// format_flags&3 非零时值联合整体跳过（multileaders FIELD 实证：
-	// format_flags=3 的 value 与 childval[1] 均无 data_long/data_double）
+	// R2007 及之后版本的 format_flags 低两位非零时跳过值联合。
 	skipValue := Ver >= container.VerR2007 && formatFlags&3 != 0
 	// format_flags/data_type 键在重置判定后统一入 Fields（审计取首键，
 	// 不能让原始垃圾值先入列）
 	// switch 全集之外的 data_type 触发 LibreDWG default 分支的重置语义：
-	// 键值归零 + data_long=0，与 gold JSON 序列化一致
+	// 键值归零 + data_long=0，与 参考 JSON 序列化一致
 	if !skipValue && !tableValueDataTypeKnown(dataType) {
 		if Ver >= container.VerR2007 {
 			g.Fields = append(g.Fields, ObjField{prefix + "format_flags", int64(0)})
@@ -92,7 +88,7 @@ func decodeTableValueFields(R *bitstream.BitStream, Ver container.DwgVersion, fr
 			if err := fr.T(prefix+"data_string", g); err != nil {
 				return 0, err
 			}
-		case 8: // kDate：BL size + 二进制（gold 以大写 hex 串导出）
+		case 8: // kDate：BL size + 二进制（参考 JSON 以大写 hex 串导出）
 			sz, e := R.ReadBL()
 			if e != nil {
 				return 0, e
@@ -641,7 +637,7 @@ func decodeGenericLEADEROBJECTCONTEXTDATA_HDL(R *bitstream.BitStream, Ver contai
 
 // init 注册设置类解码器。
 func init() {
-	// 类表 DXF 名与 gold object 名不同，经 jsonName 映射
+	// 类表 DXF 名与 参考 JSON object 名不同，经 jsonName 映射
 	InternalClassDecoders["LEADEROBJECTCONTEXTDATA"] = internalObjectSpec{Decode: decodeGenericLEADEROBJECTCONTEXTDATA, Hdl: decodeGenericLEADEROBJECTCONTEXTDATA_HDL, jsonName: "LEADEROBJECTCONTEXTDATA"}
 	InternalClassDecoders["ACDB_LEADEROBJECTCONTEXTDATA_CLASS"] = internalObjectSpec{Decode: decodeGenericLEADEROBJECTCONTEXTDATA, Hdl: decodeGenericLEADEROBJECTCONTEXTDATA_HDL, jsonName: "LEADEROBJECTCONTEXTDATA"}
 	for name, d := range map[string]func(*bitstream.BitStream, container.DwgVersion, *GfRead, *ObjGeneric) error{

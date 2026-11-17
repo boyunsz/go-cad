@@ -1,13 +1,9 @@
-// sheet_texts.go 实现图纸文本收集与按图框归属（SheetText + SheetTexts）：
-// 面向 docling 等下游文本抽取场景，把模型空间全部文字（TEXT/MTEXT/ATTRIB，
-// 含 INSERT 块引用内部文本）导出为「内容 + 世界坐标 + 字高 + 旋转 + 图层名
-// + 所属图框序号」的平铺清单。图框复用 DetectSheets 的识别结果，归属判定
-// 只做插入点落框（与图框识别的框内内容判定同口径），不重复实现图框识别。
+// 本文件收集模型空间中的文字，并关联已识别的图框。
 //
-// 主要模块划分：
-//   - SheetText：单条文本的导出结构（Sheet 为 1-based 图框序号，0=框外）
-//   - SheetTexts：全量展开收集 + 逐条归属（收集与渲染同一展开管线，
-//     保证文本清单与出图内容一致）
+// 输出包含文字内容、世界坐标、字高、旋转角、图层名和图框序号。
+// 块内文字通过展开流程收集，图框复用 DetectSheets 的结果；归属依据
+// 文字插入点是否位于图框范围内，图框序号从 1 开始，0 表示框外。
+
 package render
 
 import (
@@ -21,22 +17,16 @@ import (
 type SheetText struct {
 	Text     string  // 文本内容（MTEXT 已剥离格式码，多行以 \n 连接）
 	X, Y     float64 // 插入点世界坐标（块内文本已经 INSERT 变换到世界系）
-	Height   float64 // 世界字高（含块引用缩放，与渲染清晰度自检同口径）
+	Height   float64 // 世界字高（含块引用缩放，与渲染清晰度自检采用相同规则）
 	Rotation float64 // 基线旋转角（度，0~360；含块引用旋转与镜像后的实际方向）
 	Layer    string  // 图层名（层表解析失败或未知名时为空串，不阻塞导出）
 	Sheet    int     // 所属图框序号：1-based 对应 DetectSheets 输出顺序；0=不在任何图框内
 }
 
-// SheetTexts 收集文档全部文本并按图框归属。sheets 为 DetectSheets 的输出
-// （调用方负责先识别；无图框兜底整图单张的场景由调用方剔除后传 nil/空，
-// 门面 cad.SheetTexts 约定此时全部文本 Sheet=0）。
-//
-// 收集口径与渲染完全一致：复用 Tessellator 全量展开（INSERT 递归展开含
-// 块变换、ATTRIB 属性文本按插入变换展开），取文字占位图元（label，含真实
-// 字形版式信息）——因此块引用内部文本天然覆盖，且文本清单与出图内容同源；
-// 边界：展开预算耗尽或块引用环被短路时，深处文本与渲染同样缺失（渲染也
-// 画不出的文本不进清单，保证两者一致）。占位条回退路径（无真实文本的
-// label）与空白文本跳过。
+// SheetTexts 展开模型空间及块引用，收集带实际文本的文字图元。
+// 图框由调用方提供，按文字插入点确定归属；空白文字和无文本占位图元
+// 不进入结果。循环引用和展开预算限制可能使部分块内文字无法收集。
+// 顶层 cad.SheetTexts 会排除自动生成的“整图”回退范围。
 func SheetTexts(doc *drawing.Document, sheets []Sheet) []SheetText {
 	if doc == nil {
 		return nil
@@ -53,8 +43,8 @@ func SheetTexts(doc *drawing.Document, sheets []Sheet) []SheetText {
 		if text == "" || !drawing.Plausible(p.Lb.X, p.Lb.Y) {
 			continue
 		}
-		// 世界字高与 sheetWidthFor/sheetTitle 同口径：推进基向量模长
-		//（含块变换比例）× 局部字高
+		// 世界字高与 sheetWidthFor/sheetTitle 采用相同规则：推进基向量模长
+		// （含块变换比例）× 局部字高
 		h := math.Hypot(p.Lb.Tx.Ux, p.Lb.Tx.Uy) * p.Lb.Tx.HWorld
 		out = append(out, SheetText{
 			Text:     text,
@@ -77,7 +67,7 @@ func layerName(doc *drawing.Document, h uint64) string {
 
 // sheetIndexOf 插入点落框归属：返回首个包含该点的图框序号（1-based，
 // sheets 顺序即 DetectSheets 输出顺序；多框重叠时取序号最小者），框外
-// 返回 0。含边界（与图框内容密度判定的闭区间口径一致）。
+// 返回 0。含边界（与图框内容密度判定的闭区间规则一致）。
 func sheetIndexOf(sheets []Sheet, x, y float64) int {
 	for i := range sheets {
 		if pointInBox(x, y, drawing.Box2{MinX: sheets[i].Box[0], MinY: sheets[i].Box[1], MaxX: sheets[i].Box[2], MaxY: sheets[i].Box[3]}) {
@@ -88,7 +78,7 @@ func sheetIndexOf(sheets []Sheet, x, y float64) int {
 }
 
 // sheetNormalizedDeg 弧度 → 规范化到 [0,360) 的角度（负角与多圈归一，
-// 导出口径稳定便于下游比对）。
+// 导出规则稳定便于下游比对）。
 func sheetNormalizedDeg(rad float64) float64 {
 	if math.IsNaN(rad) || math.IsInf(rad, 0) {
 		// 错位解码可能产生 NaN/Inf 弧度，归一前剔除

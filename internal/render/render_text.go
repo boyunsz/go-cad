@@ -1,22 +1,11 @@
-// render_text.go 实现渲染链路的真实字形文本绘制：
-// 字体探测（RenderOptions.FontPath 覆盖 → CJK 系统字体 wqy-zenhei.ttc 等
-// 候选 → x/image/basicfont 回退，basicfont 仅覆盖 ASCII，CJK 需系统字体）
-// → 按像素字号分档（8..256）光栅化 rune 覆盖率位图并按 (rune,档位) 缓存
-// → 单一 2x2 仿射矩阵承载旋转/斜切/宽度因子/生成标志镜像/INSERT 负缩放，
-// 逆映射 + 双线性采样写入画布（字形自带抗锯齿）。
-// 对齐语义：TEXT/ATTRIB 按 hAlign/vAlign 锚定偏移（锚点由离散阶段按
-// alignment_pt 语义选定为 insertion 或 alignPt）；MTEXT 按 attachment 1-9
-// 附着、rect_width 贪心换行（空格优先断行）、linespace_factor×字高行距。
-// 无可用字体或文字小于 0.75 像素时由调用方回退 textLabel 占位条或跳过。
+// 本文件实现预览渲染中的字形加载、文字布局和光栅绘制。
 //
-// 主要模块划分：
+// 字体优先使用调用方配置，再尝试系统字体和基础字体；实际字符覆盖
+// 取决于所选字体。字形按字号缓存，并通过仿射变换绘制到画布。
 //
-//	字体加载：loadFont / parseFontFile / systemFont（sync.Once 缓存解析结果）
-//	分档字面：textRenderer.face（按档位懒创建 opentype Face）
-//	字形缓存：textRenderer.glyph / rasterize（map[glyphKey]*textGlyph）
-//	版式换算：textLayoutOf（label 世界几何 → 像素空间基向量）
-//	绘制入口：drawLabelText（canvas 懒初始化渲染器并分派单行/MTEXT）
-//	掩码搬运：blitGlyph / warpMask（仿射逆映射 + 双线性覆盖率混合）
+// TEXT 和 ATTRIB 按对齐锚点定位；MTEXT 按附着点、宽度和行距排版。
+// 字体不可用或文字过小时，调用路径可能绘制占位标记或跳过。
+
 package render
 
 import (
@@ -36,24 +25,19 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-// systemFontCandidates 系统字体探测路径（按序取第一个可解析者）。
-// CJK 正黑优先（任务口径 wqy-zenhei.ttc 居首；实测其子字体在 x/image
-// sfnt 下报 invalid table offset，解析失败自动落到下一候选）；
-// DroidSansFallbackFull 为 Google 官方 CJK 回退矢量字体，简体全覆盖
-// （实测本仓图纸 736 个非 ASCII 字符仅缺全角符号 9 个，由后备链补齐；
-// 旧"缺 CJK cmap"结论系早期测试口径有误）；IPA Gothic 为日文矢量，
-// 简体专用字形（报/总/线/电/设 等约 220/736）不在 JIS 集内仅作兜底；
-// unifont 全 Unicode 点阵风格兜底；DejaVu 仅覆盖西文。
+// systemFontCandidates 列出按顺序尝试的系统字体路径。
+// 无法读取或解析的字体会被跳过；实际字符覆盖由字体内容决定，缺失字形
+// 可继续通过后备字体链查询。
 var systemFontCandidates = []string{
 	"/System/Library/Fonts/STHeiti Light.ttc",                   // macOS 简繁中文
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",      // macOS Unicode 后备
 	"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",              // 文泉驿正黑（CJK 主选）
-	"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", // Droid CJK 回退（简体全覆盖矢量）
+	"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", // Droid CJK 后备字体。
 	"/usr/share/fonts/opentype/ipafont-gothic/ipagp.ttf",        // IPA Gothic（日文矢量）
 	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",    // Noto CJK（Debian 系）
 	"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",            // 文泉驿微米黑
-	"/usr/share/fonts/opentype/unifont/unifont.otf",             // Unifont（全 Unicode 兜底）
-	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",           // 仅西文兜底
+	"/usr/share/fonts/opentype/unifont/unifont.otf",             // Unifont 后备字体；字符覆盖取决于安装版本。
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",           // 仅西文回退
 }
 
 // glyphBuckets 字形光栅字号档位（像素）：目标字号落档后缩放比 ≤1.5，
@@ -179,7 +163,7 @@ type glyphKey struct {
 type textRenderer struct {
 	cv        *canvas
 	otFont    *opentype.Font   // opentype 主字体（nil=basicfont 回退）
-	fallbacks []*opentype.Font // 后备字体链：主字体缺字时按序补字（如 Droid 简体缺全角符号由 unifont 兜底）
+	fallbacks []*opentype.Font // 后备字体链：主字体缺字时按序补字（如 Droid 简体缺全角符号由 unifont 回退）
 	basic     bool             // basicfont 回退模式（固定 13px，仅 ASCII）
 	faces     map[int]sizedFace
 	fbFaces   []map[int]sizedFace // 与 fallbacks 一一对应的字号档缓存
@@ -232,8 +216,8 @@ func loadFontChain(override string) (main *opentype.Font, fallbacks []*opentype.
 	return cachedMainFont, cachedFallbacks
 }
 
-// fallbackFace 取后备字体指定字号档的字面（懒创建；失败回退 basicfont
-// 字面保持度量自洽——后备字形与主字形同档位像素，推进/缩放口径一致）。
+// fallbackFace 懒创建并缓存指定字号的后备字体字面。
+// 创建失败时返回 basicfont 字面，并保存实际像素尺寸供布局换算。
 func (tr *textRenderer) fallbackFace(i, bucket int) sizedFace {
 	if sf, ok := tr.fbFaces[i][bucket]; ok {
 		return sf
@@ -263,8 +247,8 @@ func (tr *textRenderer) faceFor(emPx float64) sizedFace {
 	return tr.face(bucket)
 }
 
-// face 取指定字号档的字面（懒创建）。NewFace 失败（合法字体下罕见）时
-// 回退 basicfont 字面，px 记录实际有效字号保证后续度量自洽。
+// face 懒创建并缓存主字体在指定字号档位的字面。
+// 创建失败时使用 basicfont，并记录实际字面尺寸。
 func (tr *textRenderer) face(bucket int) sizedFace {
 	if sf, ok := tr.faces[bucket]; ok {
 		return sf
@@ -308,10 +292,9 @@ func (tr *textRenderer) glyph(r rune, sf sizedFace) *textGlyph {
 	return g
 }
 
-// rasterize 光栅化单 rune：主字体缺字时按序尝试后备字体补字（如 Droid
-// 简体字形缺 ℃/≤/全角引号时由 unifont 全 Unicode 兜底），避免工程图
-// 常用字符整字跳过形成缺字文本；掩码统一转为 *image.Gray 覆盖率图；
-// 异常巨型字形（超过有效字号 3 倍，错位字体可能产生）丢弃笔画仅保留推进宽。
+// rasterize 将单个字符转换为灰度字形掩码。
+// 主字体缺字时依次尝试后备字体；实际覆盖取决于可用字体。超过有效
+// 字号三倍的异常字形不绘制笔画，仅保留推进宽度。
 func (tr *textRenderer) rasterize(r rune, sf sizedFace) *textGlyph {
 	dr, mask, maskp, adv, ok := sf.face.Glyph(fixed.Point26_6{}, r)
 	if !ok {
@@ -435,9 +418,8 @@ func (tr *textRenderer) drawSingleLine(l textLayout, line string, uOff, vOff flo
 	case 1, 3, 4, 5:
 		uOff -= wWorld / 2
 	}
-	// 垂直（字面纵度近似）：1 下 = 基线落底缘 / 2 中 = 字面 extent 中心对齐锚点
-	//（DXF 73=middle 语义；字形从基线向上出墨，基线须落在锚点下方 ~0.35 字高，
-	// 若取 +0.35h 字形整体高 ~0.7 字高——公司名叠进上方轮廓 Logo 实证）
+	// 根据垂直对齐方式调整基线：底部对齐使用下降部高度，
+	// 居中和顶部对齐分别采用 0.35 和 0.70 倍字高的近似偏移。
 	switch l.vAlign {
 	case 1:
 		vOff += sf.desc / sf.px * l.hWorld
@@ -481,14 +463,9 @@ func (tr *textRenderer) blitGlyph(g *textGlyph, l textLayout, p0x, p0y, penEm fl
 	if l.mirrorY {
 		sv = -1
 	}
-	// em 空间常量项（掩码原点 (0,0) 处）：
-	// Cu = su*(pen + wf*dx/b + ob*topEm)；Cv = sv*topEm，
-	// topEm = -dy/b 为掩码顶行相对基线的高度（dy 负=基线上方，Go 字形
-	// 矩形 Y 向下）。掩码行偏移已含基线→顶行的全部信息，不再叠加 asc——
-	// 旧口径 Cv=asc−dy 多计一段上延，全部文字整体抬高 ~1em（红色注释
-	// 错位/单元格文字浮出实证）；penEm 由 drawLineAt 按 wf 压缩后的推进
-	// 传入，此处不再乘 wf——双重压缩会把字符推进压到 wf²（width_factor
-	// 0.55 实证）
+	// 将字形掩码原点转换到 em 坐标。
+	// topEm = -dy/b 已包含基线到掩码顶边的偏移，不再额外叠加字体上升部。
+	// penEm 已包含宽度因子，避免重复乘以 widthFactor。
 	ob := math.Tan(l.obliqueRad)
 	dxE, dyE := float64(g.dx)/b, float64(g.dy)/b
 	topEm := -dyE
@@ -604,9 +581,8 @@ func blendCoverage(img *image.RGBA, x, y int, col color.RGBA, cov float64) {
 	img.Pix[i+3] = byte(255*cov + float64(img.Pix[i+3])*keep + 0.5)
 }
 
-// drawMText 绘制 MTEXT：rect_width 贪心换行 → attachment 1-9 计算块内
-// 各行基线偏移（行距 = linespace_factor×字高，实测 AutoCAD extents 口径；
-// factor 未存时按旧 1.66 兜底）→ 逐行按块宽对齐落笔。
+// drawMText 根据列宽换行，并按附着点和行距绘制多行文字。
+// 有效 LineFactor 与世界字高相乘得到行距；未设置时使用 MtextLineFactor。
 func (tr *textRenderer) drawMText(l textLayout, tx *drawing.GlyphTextInfo, col color.RGBA) {
 	sf := tr.faceFor(l.emPx)
 	lines := tx.Lines
@@ -625,10 +601,7 @@ func (tr *textRenderer) drawMText(l textLayout, tx *drawing.GlyphTextInfo, col c
 			maxW = ws[i]
 		}
 	}
-	// 行距：linespace_factor（DXF 44，R2000+ 存储）×字高。1.66 旧口径经
-	// gold extents 实证虚高 66%（设计说明 11 行块底压进签名栏，extents_height
-	// 3566.7 仅容 factor×h 口径）；factor 未存储（pre-R2000/JSON·DXF 未带）
-	// 时保留 1.66 兜底（AutoCAD 历史默认单倍行距语义）
+	// 行距优先使用 LineFactor×世界字高；缺少有效系数时使用 MtextLineFactor。
 	lh := drawing.MtextLineFactor * l.hWorld
 	if tx.LineFactor > 0 {
 		lh = tx.LineFactor * l.hWorld
@@ -704,7 +677,7 @@ func (tr *textRenderer) wrapLines(lines []string, limit float64, sf sizedFace, w
 }
 
 // drawLabelText canvas 侧文本绘制入口：懒初始化渲染器后按单行/MTEXT
-// 分派；无可用字体或版式退化时回退 textLabel 占位条。
+// 分派；无可用字体或版式退化时回退 TextLabel 占位条。
 func (c *canvas) drawLabelText(lb drawing.Label, tx *drawing.GlyphTextInfo, col color.RGBA) {
 	if c.tr == nil {
 		c.tr = newTextRenderer(c)

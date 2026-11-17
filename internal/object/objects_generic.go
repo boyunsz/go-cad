@@ -1,7 +1,8 @@
-// 本文件为内部对象解码的通用框架：objGeneric 结果结构、gfRead 字段
-// 读取原语（T/BS/BD/CMC 等，随版本与 R2007+ 字符串流切换）、解码器
-// 注册表（固定码 + DXF 类名）、decodeInternalObject 主流程
-// （公共头 → dat 流专有字段 → handle 流）与 verUntilR2004 版本判定。
+// 本文件提供非图形对象解码的通用结构和分派流程。
+//
+// ObjGeneric 保存解码字段与引用，GfRead 提供带字段记录的读取操作。
+// 解码器按固定类型码或动态 DXF 类名注册；DecodeInternalObject 负责
+// 公共头、类型专用字段和句柄流的读取顺序及版本分支。
 
 package object
 
@@ -15,7 +16,7 @@ import (
 	"strings"
 )
 
-// ---- 通用内部对象解码框架 ----
+// 通用内部对象解码框架。
 // 面向布局简单的非实体对象（SCALE/DICTIONARYVAR/APPID 等）：dat 流专有
 // 字段由各类型解码器按 dwg.spec 顺序读取，handle 流（owner + reactors +
 // xdic + 附加引用）统一处理。字段以 名称+值 对记录，供调试与验证导出。
@@ -36,7 +37,7 @@ type ObjGeneric struct {
 	NumReactors   int        // reactor 数量
 	XdicMissing   bool       // R2004+：无 xdicobjhandle 标记
 	HasDsData     bool       // R2013+：关联数据集标志
-	Unknown       bool       // 无专门解码器，按 UNKNOWN_OBJ 兜底
+	Unknown       bool       // 无专门解码器，按 UNKNOWN_OBJ 回退
 	OrigClass     string     // Unknown 时的原始 DXF 类名（类表解析）
 	RawHandleBits string     // handle 流原始位串（0/1），供重编码原样写回
 	HdOffsetBits  uint64     // dat 段前导位（body 内 RL bitsize 起点；重编码位长校验用）
@@ -45,7 +46,7 @@ type ObjGeneric struct {
 	ValueHandle91 bool       // ACSH/ASSOCVARIABLE：EvalVariant/evalexpr 的 handle 值占 handle 流 1 个引用（解码→hdl 阶段传递）
 	HdlCount      int        // SURFACEACTIONBODY 族：handle 流附加引用数（解码→hdl 阶段传递）
 	PreBits       string     // R2010+ body 中 dataStartBit 之前的记录头前导位串（MS size/hss UMC），重编码原样回放
-	BodyBitOff    uint64     // R2010+ body 内 MS size 尾部对齐位（rec.bodyBitOffset），重解码重建用
+	BodyBitOff    uint64     // R2010+ body 内 MS size 尾部对齐位（rec.BodyBitOffset），重解码重建用
 	SizeBytes     uint32     // 源对象记录的 MS size（R2010+ 重编码重建 rec 元数据用）
 	HSizeField    uint32     // R2010+ handle-stream-size 字段位宽
 	HssBits       uint32     // R2010+ handle-stream-size 值（位）
@@ -126,10 +127,10 @@ type internalObjectSpec struct {
 	extraHandles    int                                                                                     // handle 流中 xdic 之后的固定引用数
 	handleVectorKey string                                                                                  // 引用数量字段名（如 GROUP 的 num_groups）：handle 流读该数量的引用
 	forceStrings    bool                                                                                    // SCALE 特例：has_strings 位恒 0 但 LibreDWG 强制按 1 处理（decode_r2007.c FIXME wrong bit）
-	jsonName        string                                                                                  // gold JSON object 名与类表 DXF 名不一致时覆盖（如 DYNAMICBLOCKPURGEPREVENTER）
+	jsonName        string                                                                                  // 参考 JSON object 名与类表 DXF 名不一致时覆盖（如 DYNAMICBLOCKPURGEPREVENTER）
 }
 
-// internalFixedDecoders 固定类型码的内部对象（键为位级类型码）。
+// InternalFixedDecoders 固定类型码的内部对象（键为位级类型码）。
 
 var InternalFixedDecoders = map[uint16]internalObjectSpec{
 	0x43:  {Decode: decodeGenericAPPID, extraHandles: 1},                                 // APPID
@@ -180,16 +181,13 @@ var InternalClassDecoders = map[string]internalObjectSpec{
 	"SUN":                    {Decode: DecodeGenericSUN},
 	"SKYLIGHT_BACKGROUND":    {Decode: decodeGenericSKYLIGHTBACKGROUND, extraHandles: 1},
 	"MTEXTOBJECTCONTEXTDATA": {Decode: decodeGenericMTEXTOBJECTCONTEXTDATA, extraHandles: 1},
-	// R2000 类表的 DXF 名带 ACDB_ 前缀与 _CLASS 后缀（fzw 类表实证）
+	// 兼容带 ACDB_ 前缀及 _CLASS 后缀的类表 DXF 名称。
 	"ACDB_MTEXTOBJECTCONTEXTDATA_CLASS": {Decode: decodeGenericMTEXTOBJECTCONTEXTDATA, extraHandles: 1},
 	"SPATIAL_FILTER":                    {Decode: decodeGenericSPATIALFILTER},
 	"ACSH_HISTORY_CLASS":                {Decode: DecodeGenericACSH_HISTORY_CLASS, extraHandles: 1},
 	"TABLEGEOMETRY":                     {Decode: decodeGenericTABLEGEOMETRY},
-	// TABLECONTENT/DATATABLE 属 dwg2.spec 的 DEBUG_CLASSES 条件块：
-	// LibreDWG 默认构建不解析（gold 输出 UNKNOWN_OBJ），暂不注册，
-	// 待有真实样本基准验证后再启用（解码器与合成流测试已就绪）
-	// "TABLECONTENT": {decode: decodeGenericTABLECONTENT, hdl: decodeGenericTABLECONTENT_HDL},
-	// "DATATABLE":    {decode: decodeGenericDATATABLE},
+	// TABLECONTENT 和 DATATABLE 解码器尚未注册到此表。
+	// 保留对应实现，但本注册表不将它们作为已支持的字段解码路径。
 	"ACDBPLACEHOLDER":                   {Decode: decodeGenericPLACEHOLDER},
 	"ACDBASSOCNETWORK":                  {Decode: decodeGenericASSOCNETWORK, Hdl: decodeGenericASSOCNETWORK_HDL},
 	"ASSOCACTION":                       {Decode: decodeGenericASSOCACTION, Hdl: decodeGenericASSOCACTION_HDL},
@@ -212,7 +210,7 @@ var InternalClassDecoders = map[string]internalObjectSpec{
 	"PDFDEFINITION":                     {Decode: decodeGenericUNDERLAYDEFINITION},
 	"DGNDEFINITION":                     {Decode: decodeGenericUNDERLAYDEFINITION},
 	"DWFDEFINITION":                     {Decode: decodeGenericUNDERLAYDEFINITION},
-	// 语料 0 实例类（dwg.spec 字段布局 + 合成位流单测自证，见 objects_longtail.go）
+	// 补充对象类型；字段布局参考 dwg.spec，相关解析见 objects_longtail.go。
 	"IDBUFFER":     {Decode: decodeGenericIDBUFFER, handleVectorKey: "num_obj_ids"},
 	"INDEX":        {Decode: decodeGenericINDEX},
 	"LAYER_INDEX":  {Decode: decodeGenericLAYER_INDEX, Hdl: decodeGenericLAYER_INDEX_HDL},
@@ -239,7 +237,7 @@ type GfRead struct {
 	Ver      container.DwgVersion
 	strs     []string // 字符串区预读的 TU 序列（R2007+ 字符串流对象）
 	strIdx   int      // 下一个待取的字符串下标
-	codepage uint16   // 文档码页（pre-R2007 的 TV 文本按此解码，fzw ANSI_936 实证）
+	codepage uint16   // 文档码页，供 R2007 之前版本的 TV 文本解码使用。
 }
 
 // T 读文字字段。
@@ -252,9 +250,8 @@ func (f *GfRead) T(key string, g *ObjGeneric) error {
 		g.Fields = append(g.Fields, ObjField{key, s})
 		return nil
 	}
-	// R2007+：从预读字符串流顺序取，dat 流不占位；流耗尽后返回空串且
-	// 不占位（Dynblocks ASSOCVARIABLE 实证，>64 串对象的截断语义与
-	// gold 一致）
+	// R2007 及之后版本从预读字符串列表顺序取值，不推进主体流。
+	// 列表耗尽后返回空字符串。
 	s := ""
 	if f.strIdx < len(f.strs) {
 		s = f.strs[f.strIdx]
@@ -365,8 +362,7 @@ func decodeGenericSCALE(R *bitstream.BitStream, Ver container.DwgVersion, fr *Gf
 // DecodeInternalObject 按类型码/类名查找并解码通用内部对象：
 // dat 流专有字段 → handle 流（owner + reactors + xdic + 附加引用）。
 func DecodeInternalObject(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver container.DwgVersion, r2013Plus bool, typeCode uint16, className string, codepage uint16) (*ObjGeneric, error) {
-	// UNDERLAY 引用实体：实体布局但经对象分发（此前 UNKNOWN_OBJ 兜底），
-	// 按实体头 + UNDERLAY_fields 解码（见 objects_underlay.go）
+	// UNDERLAY 使用实体公共头和专用字段布局，在此适配为通用对象结果。
 	if className == "PDFUNDERLAY" || className == "DWFUNDERLAY" || className == "DGNUNDERLAY" {
 		return decodeUnderlayEntity(R, rec, Ver, typeCode, className)
 	}
@@ -476,8 +472,8 @@ func DecodeInternalObject(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver 
 			// 类名未解析且非已知固定码：不处理
 			return nil, fmt.Errorf("cad: 无 %X 内部对象解码器", typeCode)
 		}
-		// 兜底：类类型对象且类名已解析但无专门解码器 → 按 UNKNOWN_OBJ
-		// 宽容处理（LibreDWG 同样以 UNKNOWN_OBJ 兜底，仅记录元数据）；
+		// 回退：类类型对象且类名已解析但无专门解码器 → 按 UNKNOWN_OBJ
+		// 宽容处理（LibreDWG 同样以 UNKNOWN_OBJ 回退，仅记录元数据）；
 		// 保留原始类名供统计与后续补齐解码器
 		origClass := className
 		className = "UNKNOWN_OBJ"
@@ -592,10 +588,8 @@ func DecodeInternalObject(R *bitstream.BitStream, rec *objrec.ObjectRecord, Ver 
 		g.HssBits = rec.HandleStreamSizeBits
 		g.BodyBitOff = rec.BodyBitOffset
 		g.PreBits = bitstream.CollectBits(R, rec.BodyBitOffset, rec.BodyBitOffset+g.HdOffsetBits)
-		// 注意：终点 dataEndBit 与 RawHandleBits 起点（bitsize）存在
-		// hSizeField 位重叠——R2010+ 首轮 handle 定位（setBitPos
-		// dataEndBit）能通过 gold 的机理未明，修正需连同首轮定位
-		// 一起统一，见任务文档 R2010+ 卡点记录
+		// 将专用字段区保留到 DataEndBit；随后从同一边界读取句柄流。
+		// ObjSizeBit 不包含句柄流长度字段的位宽，不能直接代替此绝对结束位。
 		g.HeadRawBits = bitstream.CollectBits(R, rec.BodyBitOffset+g.HdOffsetBits, rec.DataEndBit())
 	}
 	// handle 流
@@ -800,7 +794,7 @@ func decodeGenericSORTENTSTABLE_HDL(R *bitstream.BitStream, Ver container.DwgVer
 // AcDbRasterImageDef）：dat 流 = BL class_version(90) + 2RD image_size +
 // T file_path + B is_loaded + RC resunits + 2RD pixel_size。位级字段
 // 顺序与 DXF 顺序不同（DXF 端 file_path 首位）；R2007+ 的 file_path
-// 走对象字符串流（gfRead.T）。
+// 走对象字符串流（GfRead.T）。
 func decodeGenericIMAGEDEF(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	if err := fr.BL("class_version", g); err != nil {
 		return err
@@ -868,7 +862,7 @@ func decodeGenericUNDERLAYDEFINITION(R *bitstream.BitStream, Ver container.DwgVe
 	return fr.T("name", g)
 }
 
-// ---- CMC 颜色原语（对照 LibreDWG bit_read_CMC）----
+// CMC 颜色原语（对照 LibreDWG bit_read_CMC）。
 
 // CMC 读颜色字段：R2004+ 为 BS index + BL rgb + RC flag
 // （flag&1 → name T、flag&2 → book_name T，从字符串流），并校验

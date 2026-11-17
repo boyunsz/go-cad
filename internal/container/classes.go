@@ -1,9 +1,8 @@
-// classes.go 实现 AcDb:Classes 动态类名表解析。
-// R2010+ 布局：数值条目（类号/代理标志/本体类 id 等）在主流，类名字符串
-// （appName/cppName/dxfName ×N）集中在段尾的 UTF-16 字符串流；流的位置由
-// 段尾 16 字节长度字段描述。由于各版本写入端存在布局抖动，此处对段头
-// 采用「候选布局逐个探测」的定位策略，失败时返回空表（基础图元类型码
-// <500，不依赖该表，解析失败不影响渲染）。
+// 本文件解析 AcDb:Classes 段，建立动态类型码与 DXF 类名的映射。
+//
+// 解析器根据版本处理内联名称或独立字符串流，并通过候选布局定位段头。
+// 段头或记录读取失败时返回错误；动态类解析依赖此映射。
+
 package container
 
 import (
@@ -162,7 +161,7 @@ func readClassMax(rr *bitstream.BitStream) (uint16, bool) {
 
 // readClassNumericEntry 读取单个类条目的数值区（及 R2004- 的内联名称）：
 // BS classNumber + BS proxyFlags + [R2004-: TV app/cpp/dxf] + B zombie +
-// BS itemClassID + BL numInstances + BS dwgVersion + BS maintVersion +
+// BS itemClassID + BL numInstances + BS DwgVersion + BS maintVersion +
 // BL unknown + BL unknown（尾部五字段对照 LibreDWG decode.c 类条目）。
 func readClassNumericEntry(r *bitstream.BitStream, ver DwgVersion) (classEntry, error) {
 	var entry classEntry

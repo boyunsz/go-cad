@@ -1,8 +1,7 @@
-// record.go DWG 对象记录层：对象图条目（objectRef）、对象记录位级视图
-// （objectRecord/objHeader）、对象图模块化差分解码与记录头定位
-// （parseObjectRecord/parseObjHeader）。本包为实体/对象解码共用的最底层
-// 记录原语（自 objects.go 上提，用于打破 entity↔object 循环依赖），
-// 仅依赖 internal/bitstream。
+// Package objrec 提供 DWG 对象记录的定位和位流访问工具。
+//
+// 通过解析对象图中的句柄及偏移、定位记录头，建立 ObjectRecord
+// 位流视图。该层供 entity 和 object 包共同使用，不依赖具体实体类型。
 package objrec
 
 import (
@@ -18,16 +17,16 @@ type ObjectRef struct {
 	Offset uint32
 }
 
-// ObjectRecord 对象记录：MS size 字段之后的 body 位级视图。
-// 位偏移均为 body 内局部位；bodyBitOffset 为 MS 结束处在当前字节内的位偏移
-// （0-7，MS 按位流读取未必字节对齐），body 内所有定位都基于它。
+// ObjectRecord 保存对象记录主体的位流视图及定位信息。
+// BodyBitOffset 是 MS 长度字段结束处在当前字节内的位偏移，范围为 0–7；
+// 主体内的字段和句柄流定位须计入此偏移。
 type ObjectRecord struct {
 	Offset        uint32
 	Size          uint32 // MS 字段声明的数据大小（不含 CRC 与 R2010+ 的 UMC 字段）
 	Body          []byte
 	BodyBitOffset uint64
-	// R2010+ 专用：MS size 不含尾部 handle-stream-size 字段，
-	// 数据结束位（局部）= bodyBitOffset + handleSizeFieldBits + size*8 - handleStreamSizeBits
+	// R2010 及之后版本的 MS 长度不包含句柄流长度字段本身。
+	// 数据结束位为 BodyBitOffset + HandleSizeFieldBits + Size*8 - HandleStreamSizeBits。
 	R2010Plus            bool
 	HandleStreamSizeBits uint32
 	HandleSizeFieldBits  uint32
@@ -54,7 +53,7 @@ type ObjHeader struct {
 	Rec          *ObjectRecord
 	TypeCode     uint16
 	DataStartBit uint64 // 实体/对象数据区起始绝对位（类型码之后）
-	Handle       uint64 // 记录声明的主句柄（多数对象在数据区重述，以此兜底）
+	Handle       uint64 // 记录声明的主句柄（多数对象在数据区重述，以此回退）
 }
 
 // ParseObjHeader 解析类型码（body 局部偏移）：R2010+ 布局为 [UMC

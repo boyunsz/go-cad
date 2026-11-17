@@ -1,7 +1,9 @@
-// 本文件实现 ASSOC 关联系列与求值图内部对象的解码：DIMASSOC、
-// ASSOCNETWORK、ASSOCACTION/ASSOCDEPENDENCY/ASSOCGEOMDEPENDENCY、
-// EVALUATION_GRAPH、ASSOCOSNAPPOINTREFACTIONPARAM/
-// ASSOCVERTEXACTIONPARAM。
+// 本文件解析关联对象及求值图对象。
+//
+// 覆盖标注关联、关联网络、动作、依赖、几何依赖和求值图等类型。
+// 公共数据与专用字段从数据流读取，对象引用由对应句柄解析函数处理。
+//
+// 格式参考：LibreDWG 的 dwg.spec 和 dwg2.spec。
 
 package object
 
@@ -12,7 +14,7 @@ import (
 	"github.com/boyunsz/go-cad/internal/objrec"
 )
 
-// ---- DIMASSOC（dwg2.spec DWG_OBJECT(DIMASSOC)，类 526）----
+// DIMASSOC（dwg2.spec DWG_OBJECT(DIMASSOC)，类 526）。
 
 // decodeGenericDIMASSOC 解析 DIMASSOC 的 dat 流：
 // BLx associativity + B trans_space_flag + RC rotated_type + 6 个
@@ -180,7 +182,7 @@ func itoa(i int) string {
 	return string(b[pos:])
 }
 
-// ---- ASSOCNETWORK（dwg2.spec，类 518，AcDbEvalExpr/AssocAction 系列）----
+// ASSOCNETWORK（dwg2.spec，类 518，AcDbEvalExpr/AssocAction 系列）。
 
 // decodeGenericASSOCNETWORK 解析 ASSOCNETWORK 的 dat 流：
 // AcDbEvalExpr（parentid/major/minor 3×BL）+ AcDbAssocAction
@@ -210,9 +212,7 @@ func decodeGenericASSOCNETWORK(R *bitstream.BitStream, Ver container.DwgVersion,
 			return err
 		}
 	}
-	// 对照 v9 实测：R2010+ 在 num_deps 后为 BS + BL num_owned_params +
-	// BS + BL num_values 四个字段（dwg2.spec 未收录，值 0 占 2 位）；
-	// R2007 无这段
+	// R2010 及之后版本额外读取 BS、num_owned_params、BS 和 num_values；R2007 跳过此组字段。
 	if Ver >= container.VerR2010 {
 		if err = fr.BS("assoc_unknown_bs1", g); err != nil {
 			return err
@@ -265,7 +265,7 @@ func decodeGenericASSOCNETWORK_HDL(R *bitstream.BitStream, Ver container.DwgVers
 	return nil
 }
 
-// ---- ASSOCACTION / ASSOCDEPENDENCY / ASSOCGEOMDEPENDENCY 系列 ----
+// ASSOCACTION / ASSOCDEPENDENCY / ASSOCGEOMDEPENDENCY 系列。
 
 // decodeGenericASSOCACTION 解析 ASSOCACTION（类 519）的 dat 流：
 // BS class_version + BL geometry_status + BL action_index +
@@ -328,7 +328,7 @@ func decodeGenericASSOCDEPENDENCY_body(R *bitstream.BitStream, Ver container.Dwg
 			return err
 		}
 	}
-	// order 为 BLd 有符号（gold 负序值，如 -10000/-2147483648）
+	// order 为 BLd 有符号（参考 JSON 负序值，如 -10000/-2147483648）
 	if err := fr.BLd(prefix+"order", g); err != nil {
 		return err
 	}
@@ -364,10 +364,9 @@ func decodeGenericASSOCDEPENDENCY_HDL(R *bitstream.BitStream, Ver container.DwgV
 	return nil
 }
 
-// decodeGenericASSOCGEOMDEPENDENCY 解析 ASSOCGEOMDEPENDENCY（类 523）：
-// AcDbAssocDependency_fields（含尾部 depbodyid BLd，v9 R2000 实测
-// @137..147）+ class_version BS + enabled B + classname T +
-// dependent_on_compound_object B；handle 流同 ASSOCDEPENDENCY（4 个）。
+// decodeGenericASSOCGEOMDEPENDENCY 读取几何依赖对象。
+// 先读取 AcDbAssocDependency 公共字段，再读取版本、启用标志、类名及
+// 复合对象依赖标志；句柄部分由 ASSOCDEPENDENCY 的处理流程读取。
 func decodeGenericASSOCGEOMDEPENDENCY(R *bitstream.BitStream, Ver container.DwgVersion, fr *GfRead, g *ObjGeneric) error {
 	if err := decodeGenericASSOCDEPENDENCY_body(R, Ver, fr, g, "assocdep."); err != nil {
 		return err
@@ -387,7 +386,7 @@ func decodeGenericASSOCGEOMDEPENDENCY(R *bitstream.BitStream, Ver container.DwgV
 	return fr.B("dependent_on_compound_object", g)
 }
 
-// ---- EVALUATION_GRAPH（dwg2.spec，类 516，AcDbEvalGraph）----
+// EVALUATION_GRAPH（dwg2.spec，类 516，AcDbEvalGraph）。
 
 // decodeGenericEVALUATION_GRAPH 解析 EVALUATION_GRAPH 的 dat 流：
 // BL first_nodeid/copy + BL num_nodes + nodes×N（id BL + edge_flags BL
@@ -444,7 +443,7 @@ func decodeGenericEVALUATION_GRAPH(R *bitstream.BitStream, Ver container.DwgVers
 			}
 		}
 		for j := 0; j < 5; j++ {
-			// out_edge 为 BLd 有符号（gold -1 表无出边）
+			// out_edge 为 BLd 有符号（参考 JSON -1 表无出边）
 			if err := fr.BLd(fmt.Sprintf("%sout_edge[%d]", ep, j), g); err != nil {
 				return err
 			}
@@ -488,7 +487,7 @@ func decodeGenericMLINESTYLE_HDL(R *bitstream.BitStream, Ver container.DwgVersio
 	return nil
 }
 
-// ---- ASSOCOSNAPPOINTREFACTIONPARAM / ASSOCVERTEXACTIONPARAM ----
+// ASSOCOSNAPPOINTREFACTIONPARAM / ASSOCVERTEXACTIONPARAM。
 
 // decodeGenericASSOCOSNAPPOINTREFACTIONPARAM 解析 ASSOCOSNAPPOINTREFACTIONPARAM
 // （类 521）的 dat 流：BS is_r2013 + BL aap_version + T name（字符串流）+

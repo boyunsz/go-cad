@@ -1,7 +1,9 @@
-// text_percent.go 实现 CAD 文本 %% 特殊码的显示层翻译：TEXT/MTEXT/
-// ATTRIB 中的 %%c（直径）、%%d（度）、%%p（公差）等控制码在解码层
-// 原样保留（与 LibreDWG gold 逐键对齐口径），仅在图元 Label 生成时
-// 统一翻译，渲染、智能拆图与文本提取三条消费路径同源一致。
+// 本文件将 CAD 文本中的 %% 控制码转换为显示字符。
+//
+// 转换规则供文本显示和提取路径复用，包括直径、角度与公差符号。
+// 下划线和上划线开关在字符转换时移除；其他规则见 expandPercentCodes。
+// 实体中的源文本由解析层保留。
+
 package drawing
 
 import "strings"
@@ -14,7 +16,7 @@ import "strings"
 //   - %%%      → %（转义）
 //   - 其余 %%x → 原样保留
 //
-// 不含 %% 的文本零开销直返（中文工程图绝大多数文本不携带该码）。
+// 不含 %% 的文本直接返回原字符串。
 func expandPercentCodes(s string) string {
 	if !strings.Contains(s, "%%") {
 		return s

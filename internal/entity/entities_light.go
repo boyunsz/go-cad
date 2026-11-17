@@ -1,7 +1,10 @@
-// entities_light.go LIGHT 光源实体解码（dwg2.spec DWG_ENTITY(LIGHT)，
-// AcDbLight：SpotLight/PointLight/DistantLight）。基线段 19 字段 + 光度
-// 分支（NOD 字典 LIGHTINGUNITS=2 触发的 has_photometric_data 子段，
-// IES 光域网模型 22 字段）。
+// 本文件解析 LIGHT 光源实体。
+//
+// 解析内容包括基础光源参数及光度数据分支。光度数据是否存在由解析
+// 上下文提供，相关字段保留在 EntLight 中供后续处理。
+//
+// 格式参考：LibreDWG dwg2.spec 中的 LIGHT 定义。
+
 package entity
 
 import (
@@ -11,13 +14,13 @@ import (
 
 // EntLight 光源实体：基线字段 + light_color CMC 的版本双形态。
 // hasCMCTrue 标记 R2004+ 结构（BS index + BL rgb + RC flag），其余
-// 版本 light_color 仅 BS 索引；rgb 原值保留供审计导出（gold 的
+// 版本 light_color 仅 BS 索引；rgb 原值保留供审计导出（参考 JSON 的
 // light_color.rgb 为完整 32 位 rgb 的 %06x 形态，含 method 高字节）。
 type EntLight struct {
 	BaseEntity
 	ClassVersion         uint32 // BL 90：类版本（VALUEOUTOFBOUNDS 10）
 	Name                 string // TV/TU 1
-	LightType            uint32 // BL 70：0 点光 1 远光 3 聚光；gold 的 type 键即该值（覆盖顶层类型码）
+	LightType            uint32 // BL 70：0 点光 1 远光 3 聚光；参考 JSON 的 type 键即该值（覆盖顶层类型码）
 	Status               bool   // B 290
 	LightColorIndex      uint16 // CMC.BS 63：ACI 索引（R2004+ 经调色板反查修正）
 	LightColorRGB        uint32 // CMC.BL：R2004+ 真彩色原始 32 位（0xMRRGGBB）
@@ -38,7 +41,7 @@ type EntLight struct {
 	ShadowMapSize        uint16 // BS 91
 	ShadowMapSoftness    int8   // RCd 280：有符号字节
 
-	// ---- 光度分支（is_photometric：NOD 字典 LIGHTINGUNITS=="2"）----
+	// 光度分支（is_photometric：NOD 字典 LIGHTINGUNITS=="2"）。
 	isPhotometric     bool      // 解码上下文判定结果（不占位流）
 	hasPhotometricImg bool      // B 295：has_photometric_data（IES 数据存在）
 	hasWebfile        bool      // B 290：光域网文件标志
@@ -116,9 +119,9 @@ func decodeLight(r *bitstream.BitStream, Head *CommonEntityHead, ver container.D
 			return nil, e
 		}
 		l.LightColorFlag = fb
-		// flag>=4 非法（LibreDWG LOG_ERROR 后清零，不读 name/book_name）；
-		// flag&1/&2 的 name/book_name 在 R2007+ 存于字符串流（dat 不占位，
-		// 需在主体全部读完后按读取序回填），样本未覆盖该分支，暂不读取
+		// 颜色标志大于等于 4 时清零。
+		// 当前分支不恢复 name 和 book_name；R2007 及之后版本的这些字符串
+		// 不占主体位流位置。
 		if l.LightColorFlag >= 4 {
 			l.LightColorFlag = 0
 		}
