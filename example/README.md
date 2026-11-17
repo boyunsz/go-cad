@@ -1,6 +1,6 @@
 # DWG 转 SVG 示例
 
-示例是独立 Go 模块，通过 `replace ... => ..` 使用父目录源码。以下命令均从仓库根目录运行；无需 Shell 脚本或固定目录结构。
+示例是独立 Go 模块，通过 `replace ... => ..` 使用父目录源码。以下命令均从仓库根目录运行。
 
 ## 输出全部布局并合并
 
@@ -61,7 +61,7 @@ SVG 可缩放，但文字度量、线型与源文件的打印设置仍影响显�
 go -C example run . -f /path/to/drawing.dwg -o ./output -plot -style clear -text-mode path -render-only -combine-svg -xref-map /path/to/xref-map.json
 ```
 
-相对路径以映射文件所在目录为基准。读取外参后，按主图插入点、块基点、缩放、旋转及视口裁切绘制。映射必须对应实际声明的名称；缺失外参会记录诊断，程序不会从 PDF 补画或自动下载图纸。云盘需由操作系统事先挂载，程序只读取其中的文件。
+相对路径以映射文件所在目录为基准。读取外参后，按主图插入点、块基点、缩放、旋转及视口裁切绘制。映射必须对应实际声明的名称，缺失外参会记录诊断。使用网络共享路径时，需先由操作系统挂载并确认文件可访问。
 
 ## 字体
 
@@ -75,13 +75,11 @@ go -C example run . -f /path/to/drawing.dwg -o ./output -plot -style clear -text
 
 通过 `-font-map /path/to/font-map.json` 加载，或使用 `-font-dir /path/to/fonts`。请检查 `text-font-audit.json` 中的字体替换和缺失字形记录。字体文件不随仓库分发。
 
-## 测试与本地文件
+## 测试
 
 ```console
 go test ./...
 go -C example test ./...
 ```
 
-图纸回归测试使用匿名样本编号，读取根目录 `.local/fixtures.json` 或 `GO_CAD_FIXTURES` 指定的配置。没有对应样本时自动跳过。不要将私有图纸名称或挂载路径写回测试源码。
-
-所有 Shell 脚本、JSON、本机配置、图纸和渲染产物均被忽略。现有本地脚本仍可自行使用，但不会随 Git 仓库发布。
+图纸回归测试使用样本编号，读取根目录 `.local/fixtures.json` 或 `GO_CAD_FIXTURES` 指定的配置。没有对应样本时自动跳过。
