@@ -1,39 +1,56 @@
+<div align="center">
+
 # Go-CAD
 
-Go 语言 CAD 文件处理库，提供 DWG / DXF 解析、文本提取、SVG / PNG 渲染及图纸导出能力。适用于图纸预览、文档处理和 CAD 数据集成。
+**A pure-Go 2D CAD processing library for DWG / DXF parsing, text extraction, SVG / PNG rendering, and drawing export.**
 
-[快速开始](#快速开始) · [Go API](#go-api) · [命令行指南](example/README.md) · [开发指南](CONTRIBUTING.md) · [许可证](LICENSE)
+[![CI](https://github.com/boyunsz/go-cad/actions/workflows/ci.yml/badge.svg)](https://github.com/boyunsz/go-cad/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/boyunsz/go-cad.svg)](https://pkg.go.dev/github.com/boyunsz/go-cad)
+[![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-## 功能概览
+**English** | [简体中文](README.zh-CN.md)
 
-| 能力 | 说明 |
+[Features](#features) · [Quick Start](#quick-start) · [Go API](#go-api) · [Compatibility](#compatibility--rendering-scope) · [CLI Guide](example/README.md) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+## Overview
+
+**Go-CAD** is a zero-CGO, pure-Go library for working with AutoCAD DWG and DXF drawings. It parses drawing containers, entities, symbol tables, blocks, and paper-space layouts into a unified `Document` model, and renders faithful vector SVG and raster PNG outputs with full diagnostic metadata.
+
+Designed for **drawing preview services**, **engineering document pipelines**, and **CAD data integration**.
+
+## Features
+
+| Capability | Description |
 | --- | --- |
-| 图纸解析 | 读取 DWG、ASCII / 二进制 DXF，以及 `dwgread -O JSON` 格式的数据 |
-| 文本与结构 | 查询文字、实体、块引用、图层和布局信息 |
-| 矢量与预览 | 输出 SVG 和 PNG，复用几何、文字布局与视口计算结果 |
-| 布局输出 | 渲染模型空间或指定纸张布局，处理正交视口及裁剪 |
-| 多页合并 | 示例程序按布局页签顺序，将各页纵向组合为一个 SVG |
-| 资源解析 | 通过显式映射加载外部 DWG 和字体，读取关联的外部位图 |
-| 图纸导出 | 提供 DXF 和 DWG 写出接口；覆盖范围取决于输入版本及已支持的数据类型 |
-| 转换诊断 | 记录字体替换、缺失资源、近似处理及实体到输出图元的对应关系 |
+| **Drawing Parsing** | Pure-Go parser for DWG (R9–R11, R13–R2018), ASCII / binary DXF, and `dwgread -O JSON` |
+| **Text & Encoding** | Extracts TEXT / MTEXT / ATTRIB with full `\U+`, `\M+` (GBK / Big5 / Shift-JIS / EUC-KR), split-MIF, and symbol-name escape decoding |
+| **Vector & Raster Rendering** | Shared `PreparedDrawing` pipeline generating both vector SVG and raster PNG with consistent geometry, typography, and viewports |
+| **Layouts & Viewports** | Renders model space or named paper-space layouts with orthographic viewport transforms and clipping |
+| **Multi-Page SVG** | Example CLI merges paper layouts in tab order into a single vertical SVG |
+| **External Resources** | Explicit mapping for external reference DWGs (`XrefFiles`), TrueType/OpenType fonts (`FontMap` / `FontDir`), and raster images (`ResourceDir`) |
+| **Drawing Export** | DXF and DWG writers preserving original symbol names and container metadata where supported |
+| **Diagnostics & Audit** | Structured audit reports for font substitutions, missing glyphs, external references, skipped records, and entity-to-primitive provenance |
 
-## 环境要求
+## Requirements
 
-- **Go 1.25 或更新版本**。
-- 中文等多语言文字需要相应字体，可通过字体映射或字体目录配置。
-- 含外部引用的图纸需要可访问的配件文件；使用网络共享时，应先完成系统挂载。
+- **Go 1.25 or later** (zero CGO required).
+- For CJK and multilingual text rendering, configure appropriate system or local TTF / OTF / TTC fonts via `FontMap` or `FontDir`.
+- Drawings with external references (Xrefs) require local access to referenced DWG files via explicit mapping (`XrefFiles`); no implicit network lookups are performed.
 
-## 快速开始
+## Quick Start
 
-### 作为 Go 库使用
-
-在已有 Go 模块中添加依赖：
+### Install as a Go Library
 
 ```console
 go get github.com/boyunsz/go-cad
 ```
 
-### 运行转换示例
+### Run the Example CLI
 
 ```console
 git clone https://github.com/boyunsz/go-cad.git
@@ -49,18 +66,17 @@ go -C example run . \
   -combine-svg
 ```
 
-将输入路径替换为实际文件。上述命令输出模型空间、各纸张布局和合并 SVG，同时生成 PNG 预览及诊断记录。
+Replace `/path/to/drawing.dwg` with an actual DWG file. The command outputs model space, each paper layout, a combined multi-page SVG, PNG previews, and diagnostic JSON reports under `example/output/`.
 
-- 输出目录为 `example/output/`；`go -C example` 使相对路径以 `example/` 为基准。
-- `-combine-svg` 自动选择全部布局。合并文件按页签顺序排列纸张；没有纸张布局时使用模型空间。
-- `-style clear` 使用黑白显示；`-fill-mode outline` 将实心 HATCH 显示为轮廓，保留箭头和图案填充。需要原始颜色与填充时，使用 `-style original -fill-mode source`。
-- `-render-only` 跳过 DXF 往返校验，保留渲染和诊断输出。
+- `-combine-svg` automatically includes all paper layouts in tab order (falling back to model space if none exist).
+- `-style clear` renders monochrome black ink; `-fill-mode outline` outlines solid HATCH fills while preserving arrows and pattern hatches. Use `-style original -fill-mode source` to keep original colors and solid fills.
+- `-render-only` skips DXF round-trip verification while keeping rendering and diagnostic output.
 
-单页导出、字体、外部引用、输出文件和参数说明见 [命令行指南](example/README.md)。命令行转换入口接收 DWG；DXF 和 JSON 通过 Go API 读取。
+For single-layout export, font/Xref mapping files, and all CLI flags, see the [CLI Guide](example/README.md).
 
 ## Go API
 
-以下程序读取 DWG 并生成模型空间 SVG。将代码保存为应用模块中的 `main.go`：
+The following example parses a DWG file and renders model space to a vector SVG:
 
 ```go
 package main
@@ -78,6 +94,7 @@ func main() {
 		log.Fatal("usage: cad-demo input.dwg output.svg")
 	}
 	input, output := os.Args[1], os.Args[2]
+
 	data, err := os.ReadFile(input)
 	if err != nil {
 		log.Fatal(err)
@@ -86,6 +103,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	prepared, err := cad.PrepareDrawing(doc, cad.RenderOptions{
 		Layout:         "model",
 		SourceDir:      filepath.Dir(input),
@@ -98,6 +116,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	svg, err := prepared.SVG()
 	if err != nil {
 		log.Fatal(err)
@@ -105,80 +124,83 @@ func main() {
 	if err := os.WriteFile(output, svg, 0o644); err != nil {
 		log.Fatal(err)
 	}
+
 	log.Printf("version=%s entities=%d skipped=%d diagnostics=%d",
 		doc.Version(), doc.EntityCount(), doc.Skipped(), len(prepared.Audit.Diagnostics))
 }
 ```
 
-添加依赖后，在应用模块中运行：
+Run it inside your module:
 
 ```console
 go run . "/path/to/drawing.dwg" drawing.svg
 ```
 
-`prepared.PNG()` 可复用同一次准备结果生成 PNG。`prepared.Audit` 提供渲染诊断；`doc.Skipped()` 表示解析时跳过的记录数量，两者用于检查不同阶段的问题。
+- Call `prepared.PNG()` to reuse the exact same prepared geometry and typography for raster output.
+- Inspect `prepared.Audit` for rendering diagnostics and `doc.Skipped()` for records skipped during parsing.
+- Enable `Plot: true` to respect layer plot visibility, and configure `FontMap`, `FontDir`, and `XrefFiles` for custom fonts and external references.
 
-需要按打印可见性过滤内容时，在选项中设置 `Plot: true`；字体和外参可通过 `FontMap`、`FontDir` 和 `XrefFiles` 配置。
+### Key APIs
 
-### 常用接口
-
-| 接口 | 用途 |
+| API | Purpose |
 | --- | --- |
-| `cad.Parse(data)` | 解析 DWG 字节 |
-| `cad.ParseDXF(data)` | 解析 ASCII 或二进制 DXF |
-| `cad.ParseJSON(data)` | 导入 `dwgread -O JSON` 结构 |
-| `doc.Texts()` | 提取模型空间及块引用中的文字 |
-| `doc.Layouts()` | 查询布局名称、页签顺序及空间信息 |
-| `cad.PrepareDrawing(doc, opts)` | 准备指定空间的几何、文字、视口和诊断 |
-| `prepared.SVG()` / `prepared.PNG()` | 输出共享渲染结果 |
-| `cad.DetectSheets(doc)` | 按模型空间内容启发式识别图框 |
-| `cad.WriteDXF(doc, writer)` | 写出 DXF |
-| `cad.WriteDwg(doc, writer)` | 根据文档携带的数据选择 DWG 写出路径 |
+| `cad.Parse(data)` | Parse a DWG byte slice |
+| `cad.ParseDXF(data)` | Parse ASCII or binary DXF |
+| `cad.ParseJSON(data)` | Import `dwgread -O JSON` data |
+| `doc.Texts()` | Extract texts from model space and block references |
+| `doc.Layouts()` | Query layout names, tab order, and space metadata |
+| `cad.PrepareDrawing(doc, opts)` | Build shared geometry, typography, viewport, and diagnostics |
+| `prepared.SVG()` / `prepared.PNG()` | Export vector SVG or raster PNG from the prepared scene |
+| `cad.DetectSheets(doc)` | Heuristically detect drawing frames in model space |
+| `cad.SheetTexts(doc)` | Extract texts with sheet frame attribution |
+| `cad.WriteDXF(doc, writer)` | Export document to DXF |
+| `cad.WriteDwg(doc, writer)` | Export document to DWG based on available container data |
 
-调用 `cad.RenderSVG` 或 `cad.RenderPNG` 时，应设置 `RenderOptions.Fidelity = "faithful"` 以使用共享渲染流程；未设置时使用预览流程。直接调用 `PrepareDrawing` 无需额外设置该字段。
+> [!NOTE]
+> When calling `cad.RenderSVG` or `cad.RenderPNG` directly, set `RenderOptions.Fidelity = "faithful"` to use the shared `PrepareDrawing` pipeline; omitting it uses the legacy preview pipeline. Calling `cad.PrepareDrawing` directly always uses the faithful pipeline.
 
-## 兼容性与渲染边界
+## Compatibility & Rendering Scope
 
-DWG 读取路径覆盖 R9、R10、R11，以及 R13、R14、R2000、R2004、R2007、R2010、R2013 和 R2018 文件标识。实体、专用对象及写出能力的覆盖程度随版本而异，应结合实际样本和诊断信息验收。
+DWG reading covers file signatures for **R9, R10, R11**, and **R13, R14, R2000, R2004, R2007, R2010, R2013, R2018**. Entity, object, and export coverage varies by version—validate against representative drawings and audit diagnostics.
 
-| 场景 | 当前行为 |
+| Area | Current Behavior |
 | --- | --- |
-| 字体 | 支持可用的 TTF / OTF / TTC 字体；SHX、Big Font 需要替代字体，字形可能不同 |
-| 打印样式 | 支持图层打印可见性及已解析的线型、线宽；尚未复现 CTB / STB 打印样式表 |
-| 文字排版 | 支持常用 TEXT / MTEXT 排版；高级段落制表、缩进和复杂文字塑形仍有限制 |
-| 曲线 | 按容差细分；任意有理曲线的全局误差不保证均受该容差约束 |
-| 外部资源 | 依赖可访问的原文件；已匹配的外参读取失败可能终止转换，其他缺失资源由诊断记录 |
-| 空间选择 | 纸张布局使用源视口；模型空间图框识别为启发式分幅，两者含义不同 |
+| **Fonts** | Supports TTF / OTF / TTC fonts; SHX and Big Fonts require substitute fonts and may differ in glyph shape |
+| **Plot Styles** | Supports layer plot visibility and parsed linetypes/lineweights; CTB / STB plot style tables are not yet emulated |
+| **Text Layout** | Supports common TEXT / MTEXT formatting; advanced paragraph tabs, indentation, and complex shaping remain limited |
+| **Curves** | Tessellated by `CurveTolerance`; global error bounds are not guaranteed for arbitrary rational splines |
+| **External Resources** | Requires accessible local files; matched Xref read failures terminate conversion, while other missing resources are recorded in diagnostics |
+| **Space Selection** | Paper layouts use source viewports; model-space sheet detection is heuristic frame segmentation |
 
-SVG 中的矢量几何可缩放，嵌入位图仍受原始像素限制。文字外观还取决于字体和排版结果；建议在查看器中直接检查 SVG，并同步检查转换诊断。
-
-## 项目结构
+## Project Structure
 
 ```text
 go-cad/
-├── cad.go                 # 公共 API
-├── go.mod                 # 库模块及依赖
-├── example/               # 独立命令行示例模块
+├── cad.go                 # Public library API
+├── go.mod                 # Root Go module (zero CGO)
+├── example/               # Standalone CLI module
 ├── internal/
-│   ├── bitstream/         # 位流读写与校验
-│   ├── container/         # DWG 容器、分页与压缩
-│   ├── objrec/            # 对象记录与类型码
-│   ├── entity/            # 实体模型及字段解析
-│   ├── object/            # 非实体对象与符号表
-│   ├── drawing/           # 文档模型、格式导入、布局与几何展开
-│   ├── render/            # 字体、资源、SVG / PNG 渲染
-│   ├── writer/            # DWG 编码与写出
-│   └── testfixtures/      # 可选样本测试配置
-├── .github/workflows/     # 持续集成
-├── CONTRIBUTING.md        # 开发与验证指南
-└── LICENSE
+│   ├── bitstream/         # Bitstream I/O and checksums
+│   ├── container/         # DWG containers, pages, and compression
+│   ├── objrec/            # Object records and type codes
+│   ├── entity/            # Entity models and field decoders
+│   ├── object/            # Non-entity objects and symbol tables
+│   ├── drawing/           # Document model, importers, layouts, and expansion
+│   ├── render/            # Fonts, external resources, SVG / PNG rendering
+│   ├── writer/            # DWG encoding and writing
+│   └── testfixtures/      # Optional fixture test configuration
+├── .github/workflows/     # GitHub Actions CI
+├── CONTRIBUTING.md        # Development and verification guide
+├── README.md              # English documentation
+├── README.zh-CN.md        # Simplified Chinese documentation
+└── LICENSE                # Apache License 2.0
 ```
 
-根模块提供库接口，`example/` 通过独立 `go.mod` 和本地 `replace` 使用父目录源码。业务集成应从根包 `github.com/boyunsz/go-cad` 导入。
+The root module exposes the library API (`github.com/boyunsz/go-cad`). The `example/` directory is a separate module referencing the parent via a local `replace` directive.
 
-## 开发与验证
+## Development & Verification
 
-在仓库根目录运行：
+Run the test and build checks from the repository root:
 
 ```console
 go test ./...
@@ -187,8 +209,10 @@ go build ./...
 go -C example build -o ../bin/cad-example .
 ```
 
-CI 对库模块和示例模块分别执行测试与构建。依赖额外样本的回归测试在未配置样本时跳过；配置方法、代码规范和问题报告要求见 [开发指南](CONTRIBUTING.md)。
+CI runs tests and builds for both modules on every push and pull request. Optional fixture-based regression tests are automatically skipped when fixtures are not configured. See [CONTRIBUTING.md](CONTRIBUTING.md) for fixture setup, coding conventions, and issue reporting guidelines.
 
-## 项目来源与许可证
+## Provenance & License
 
-本项目基于 [unitedrhino/go-cad](https://github.com/unitedrhino/go-cad) 的 `ddd91eea9618cc1a2feec32ab6397239d1f9f315` 版本维护，采用 [Apache License 2.0](LICENSE)。
+Maintained from [unitedrhino/go-cad](https://github.com/unitedrhino/go-cad) at commit `ddd91eea9618cc1a2feec32ab6397239d1f9f315`.
+
+Licensed under the [Apache License 2.0](LICENSE).
