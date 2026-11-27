@@ -64,13 +64,14 @@ func (ts *Tessellator) appendExternal(out []Primitive, ins *entity.EntInsert, t 
 	doc.Ltscale = ts.Doc.Ltscale
 	doc.HeaderVars["PSLTSCALE"] = ts.Doc.HeaderVars["PSLTSCALE"]
 	name, _ := ts.Doc.InternalObjs[ins.BlockHeader].Field("name").(string)
+	name = expandSymbolNameEscapes(name)
 	type hostLayer struct {
 		handle uint64
 		layer  LayerColor
 	}
 	hosts := map[string]hostLayer{}
 	for h, l := range ts.Doc.LayerColors {
-		hosts[strings.ToLower(l.Name)] = hostLayer{h, l}
+		hosts[strings.ToLower(l.DisplayName())] = hostLayer{h, l}
 	}
 	layers := make([]uint64, 0, len(doc.LayerColors))
 	for h := range doc.LayerColors {
@@ -87,7 +88,7 @@ func (ts *Tessellator) appendExternal(out []Primitive, ins *entity.EntInsert, t 
 		if l.Name == "0" {
 			zero = h
 		}
-		hl, found := hosts[strings.ToLower(name+"|"+l.Name)]
+		hl, found := hosts[strings.ToLower(name+"|"+l.DisplayName())]
 		if !found && l.Name == "0" {
 			hl = hostLayer{ts.parentLayer, ts.Doc.LayerColors[ts.parentLayer]}
 			found = true

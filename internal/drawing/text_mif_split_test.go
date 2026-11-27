@@ -1,6 +1,9 @@
 package drawing
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSplitMIFByteSequences 验证拆分 MIF 字节在文本提取、格式片段和普通显示中得到一致解码。
 func TestSplitMIFByteSequences(t *testing.T) {
@@ -14,6 +17,8 @@ func TestSplitMIFByteSequences(t *testing.T) {
 		{`\M+50086\U+631d\M+5BB00`, "單位"},
 		{`膠前圈\M+50089罕橇\M+5BA00`, "膠前圈壓鼻梁"},
 		{`\M+5008F溺R架背面水平看湮斗盒位置:`, "從鏡架背面水平看湮斗盒位置:"},
+		{`\M+50088\U+78b3\U+8299\U+5d4c\U+5203\U+97ea\U+e326\U+928fD`, "執架角度需跟足圖"},
+		{`\U+5ba2\U+4eba\U+7279\M+50084e\U+8981\U+6c42,\M+5009F\M+5009F\U+6597\M+50088\U+78b3\U+8299\U+5d4c\U+5203\U+97ea\U+e326\U+928fD\U+7d19\U+6548\U+679c,\P\U+5e76\U+6bcf\U+4ed8\U+67b6\U+5fc5\U+9808\U+7528\U+9f3b\U+6881\M+50099z\M+5009Cy\U+6a21\M+50099z\M+5009Cy\U+624d\U+53ef\U+51fa\U+8ca8`, "客人特別要求,煙斗執架角度需跟足圖紙效果,\n并每付架必須用鼻梁檢測模檢測才可出貨"},
 		{`{\H0.7x;繪\M+50088D}\P片\M+5008F\M+5009D`, "繪圖\n片彎"},
 	} {
 		if got := StripMTextFormat(tc.raw); got != tc.want {
@@ -29,7 +34,7 @@ func TestSplitMIFByteSequences(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("runs %q = %q, want %q", tc.raw, got, tc.want)
 		}
-		if tc.raw[0] != '{' {
+		if tc.raw[0] != '{' && !strings.Contains(tc.raw, `\P`) {
 			if got := PlainDisplay(tc.raw); got != tc.want {
 				t.Errorf("plain %q = %q, want %q", tc.raw, got, tc.want)
 			}

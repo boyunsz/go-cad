@@ -369,8 +369,10 @@ func dxfLayerName(h uint64) string {
 // layerName 图层句柄 → 真名：LAYER 表记录解码保存的 name（DWG 扫描/
 // 字符串流、JSON name 键、DXF LAYER 表均有）；缺失时按句柄合成。
 func (x *DxfWriter) layerName(h uint64) string {
-	if lc, ok := x.Doc.LayerColors[h]; ok && lc.Name != "" {
-		return lc.Name
+	if lc, ok := x.Doc.LayerColors[h]; ok {
+		if name := lc.SourceName(); name != "" {
+			return name
+		}
 	}
 	return dxfLayerName(h)
 }
@@ -442,8 +444,8 @@ func dxfCollectLayers(doc *Document) []dxfLayerRecord {
 		seen[h] = true
 		rec := dxfLayerRecord{Handle: h, Name: dxfLayerName(h), Index: 7}
 		if lc, ok := doc.LayerColors[h]; ok {
-			if lc.Name != "" {
-				rec.Name = lc.Name
+			if name := lc.SourceName(); name != "" {
+				rec.Name = name
 			}
 			if lc.HasTrue {
 				rec.TrueColor = lc.TrueColor & 0x00FFFFFF

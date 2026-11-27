@@ -169,9 +169,12 @@ func (em *svgEmitter) layerID(doc *drawing.Document, h uint64) string {
 		return id
 	}
 	id := ""
-	if lc, ok := doc.LayerColors[h]; ok && lc.Name != "" {
-		id = lc.Name
-	} else {
+	if lc, ok := doc.LayerColors[h]; ok {
+		if name := lc.DisplayName(); name != "" {
+			id = name
+		}
+	}
+	if id == "" {
 		id = fmt.Sprintf("handle-%X", h)
 	}
 	em.layerIDs[h] = id

@@ -120,3 +120,39 @@ func TestMTextInlineWidthOverridesStyleAndRelativeWidthMultiplies(t *testing.T) 
 		}
 	}
 }
+
+// TestLayerNameMIFEscapesDecodedInSVGAndSheetTexts 验证图层名中的 MIF 转义在 SVG 和文本导出中均被正确解码。
+func TestLayerNameMIFEscapesDecodedInSVGAndSheetTexts(t *testing.T) {
+	raw := `\M+5A5EC\M+5A5A4\M+5A5E4\M+5A960 1`
+	want := "レイヤー 1"
+	doc := &drawing.Document{
+		LayerColors: map[uint64]drawing.LayerColor{1: {Name: raw, Index: 7}},
+		ModelSpace: []any{
+			&entity.EntLine{BaseEntity: entity.BaseEntity{Handle: 10, Layer: 1}, Start: entity.Point3{X: 0, Y: 0}, End: entity.Point3{X: 10, Y: 0}},
+			&entity.EntText{BaseEntity: entity.BaseEntity{Handle: 11, Layer: 1}, Text: "A", Height: 2},
+		},
+	}
+	svg, err := RenderSVG(doc, RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(svg), want) || strings.Contains(string(svg), `\M+`) {
+		t.Errorf("RenderSVG layer name not decoded: %s", string(svg))
+	}
+	p, err := PrepareDrawing(doc, RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsvgBytes, err := p.SVG()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsvg := string(fsvgBytes)
+	if !strings.Contains(fsvg, `data-layer="`+want+`"`) || strings.Contains(fsvg, `\M+`) {
+		t.Errorf("Faithful SVG data-layer not decoded: %s", fsvg)
+	}
+	texts := SheetTexts(doc, nil)
+	if len(texts) != 1 || texts[0].Layer != want {
+		t.Errorf("SheetTexts layer=%+v, want %q", texts, want)
+	}
+}

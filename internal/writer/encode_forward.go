@@ -1677,7 +1677,7 @@ func encodeForwardLayerBody(handle uint64, lc drawing.LayerColor, owner uint64) 
 	if lc.HasTrue {
 		idx = nearestACI(lc.TrueColor)
 	}
-	name := lc.Name
+	name := lc.SourceName()
 	if name == "" {
 		name = fmt.Sprintf("LAYER_%X", handle)
 	}

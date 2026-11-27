@@ -73,13 +73,8 @@ func readSplitMIF(s string) (string, int, bool) {
 				break
 			}
 			n = size
-			var err error
-			part, err = simplifiedchinese.GBK.NewEncoder().Bytes([]byte(string(r)))
-			if err != nil {
-				break
-			}
-			back, err := simplifiedchinese.GBK.NewDecoder().Bytes(part)
-			if err != nil || string(back) != string(r) {
+			part, ok = encodeSplitMIFRune(r)
+			if !ok {
 				break
 			}
 		}
@@ -112,4 +107,39 @@ func readSplitMIF(s string) (string, int, bool) {
 	}
 	// Incomplete or ambiguous sequences stay visible, with source text intact.
 	return "", 0, false
+}
+
+// encodeSplitMIFRune 将错位解码的字符还原回原始 1 或 2 字节 GBK/CP936 字节。
+// 优先使用 GBK；若字符落在 CP936/GBK 用户自定义区（PUA U+E000..U+E765，如 \U+e326 -> 0xFA 0xD7），
+// 则按 GBK UDA 规则还原其原始双字节。
+func encodeSplitMIFRune(r rune) ([]byte, bool) {
+	s := string(r)
+	if part, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(s)); err == nil && len(part) <= 2 {
+		if back, err := simplifiedchinese.GBK.NewDecoder().Bytes(part); err == nil && string(back) == s {
+			return part, true
+		}
+	}
+	return gbkPUABytes(r)
+}
+
+// gbkPUABytes 将 Windows CP936 / GBK 用户自定义区（UDA 1/2/3，U+E000..U+E765）
+// 映射回对应的双字节编码。WHATWG GBK/GB18030 编码器不包含这三段双字节映射。
+func gbkPUABytes(r rune) ([]byte, bool) {
+	switch {
+	case r >= 0xE000 && r <= 0xE233:
+		off := r - 0xE000
+		return []byte{byte(0xAA + off/94), byte(0xA1 + off%94)}, true
+	case r >= 0xE234 && r <= 0xE4C5:
+		off := r - 0xE234
+		return []byte{byte(0xF8 + off/94), byte(0xA1 + off%94)}, true
+	case r >= 0xE4C6 && r <= 0xE765:
+		off := r - 0xE4C6
+		lo := byte(0x40 + off%96)
+		if lo >= 0x7F {
+			lo++
+		}
+		return []byte{byte(0xA1 + off/96), lo}, true
+	default:
+		return nil, false
+	}
 }

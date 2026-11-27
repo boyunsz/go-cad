@@ -329,6 +329,7 @@ func (st *DxfState) parseLayerTable() error {
 			name := rec.str(2)
 			st.layerByName[name] = h
 			lc := LayerColor{Index: 7, Name: name} // DXF 缺省 ACI 白
+			lc.normalizeName()
 			if c, ok := rec.intVal(62); ok {
 				idx := c
 				if idx < 0 {

@@ -36,3 +36,25 @@ func TestLayoutNameDecodesMIFAndRetainsSource(t *testing.T) {
 		t.Fatalf("layout decode changed source or lost display: %+v", l)
 	}
 }
+
+// TestLayerNameDecodesMIFAndRetainsSource 验证图层名称的 MIF/Unicode（含 _U+ 清洗形式）显示解码，同时保留用于回写的原始名称。
+func TestLayerNameDecodesMIFAndRetainsSource(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{`\M+5A5EC\M+5A5A4\M+5A5E4\M+5A960 1`, "レイヤー 1"},
+		{`_U+30EC_U+30A4_U+30E4_U+30FC 1`, "レイヤー 1"},
+	} {
+		lc := LayerColor{Name: tc.raw}
+		lc.normalizeName()
+		if lc.Name != tc.want || lc.RawName != tc.raw || lc.DisplayName() != tc.want || lc.SourceName() != tc.raw {
+			t.Fatalf("layer normalize mismatch for %q: %+v", tc.raw, lc)
+		}
+	}
+	plain := LayerColor{Name: "0"}
+	plain.normalizeName()
+	if plain.Name != "0" || plain.RawName != "" || plain.SourceName() != "0" {
+		t.Fatalf("plain layer changed unexpectedly: %+v", plain)
+	}
+}

@@ -53,7 +53,7 @@ func (d *Document) Layouts() []LayoutInfo {
 			n, _ := b.Field("name").(string)
 			model = isModelSpaceBlockName(n)
 		}
-		display, raw := PlainDisplay(name), ""
+		display, raw := expandPercentCodes(expandSymbolNameEscapes(name)), ""
 		if display != name {
 			raw = name
 		}

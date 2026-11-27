@@ -207,7 +207,7 @@ func (p *PreparedDrawing) SVG() ([]byte, error) {
 		}
 		c := p.color(e)
 		hex := fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)
-		layer := primitiveDocument(p.Doc, e).LayerColors[e.Layer].Name
+		layer := primitiveDocument(p.Doc, e).LayerColors[e.Layer].DisplayName()
 		fileAttr := ""
 		if e.Source.File != "" {
 			fileAttr = " data-source-file=\"" + esc(e.Source.File) + "\""

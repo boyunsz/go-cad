@@ -486,6 +486,7 @@ func jsonLayerColor(o JsonObject) LayerColor {
 			}
 		}
 	}
+	lc.normalizeName()
 	return lc
 }
 

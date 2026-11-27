@@ -100,3 +100,33 @@ func expandUnicodeEscapes(s string) string {
 	}
 	return b.String()
 }
+
+// expandSymbolNameEscapes 展开符号表名称（图层、布局、块名等）中的 \U+ / \M+ 转义，
+// 同时兼容 AutoCAD 将符号表名中非法反斜杠清洗为下划线后产生的 _U+XXXX / _M+nXXXX 形式。
+func expandSymbolNameEscapes(s string) string {
+	if !strings.Contains(s, `U+`) && !strings.Contains(s, `M+`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '\\' {
+			b.WriteByte('\\')
+			i += 2
+		} else if r, n, ok := readDisplayEscape(s[i:]); ok {
+			b.WriteString(r)
+			i += n
+		} else if s[i] == '_' && (strings.HasPrefix(s[i:], `_U+`) || strings.HasPrefix(s[i:], `_M+`)) {
+			if r, n, ok := readDisplayEscape(`\` + s[i+1:]); ok {
+				b.WriteString(r)
+				i += n
+				continue
+			}
+			b.WriteByte(s[i])
+			i++
+		} else {
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
+}

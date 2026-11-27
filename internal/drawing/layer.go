@@ -26,6 +26,28 @@ type LayerColor struct {
 	TrueColor         uint32
 	HasTrue           bool
 	Name              string
+	RawName           string
+}
+
+// DisplayName 返回展开了 \U+ / \M+（含符号表清洗后的 _U+ / _M+）显示转义的图层名（供 SVG/文本/UI 展示）。
+func (lc LayerColor) DisplayName() string {
+	return expandSymbolNameEscapes(lc.Name)
+}
+
+// SourceName 返回用于 DWG/DXF 回写的原始图层名；未发生转义展开时与 Name 相同。
+func (lc LayerColor) SourceName() string {
+	if lc.RawName != "" {
+		return lc.RawName
+	}
+	return lc.Name
+}
+
+// normalizeName 展开图层名中的 \U+ / \M+ / _U+ / _M+ 转义，并在发生变化时保留 RawName。
+func (lc *LayerColor) normalizeName() {
+	if decoded := expandSymbolNameEscapes(lc.Name); decoded != lc.Name {
+		lc.RawName = lc.Name
+		lc.Name = decoded
+	}
 }
 
 // layerCMCLayouts CMC 变体位模式表：每项 3 个位标志编码一种字段排列——
@@ -45,21 +67,32 @@ func decodeLayerRecord(rec *objrec.ObjectRecord, objHandle uint64, ver container
 	if len(codepage) > 0 {
 		cp = codepage[0]
 	}
+	var (
+		lc  LayerColor
+		err error
+	)
 	if ver == container.VerR2004 {
-		if lc, err := decodeLayerRecordR2004(rec, objHandle, cp); err == nil {
+		if lc, err = decodeLayerRecordR2004(rec, objHandle, cp); err == nil {
+			lc.normalizeName()
 			return lc, nil
 		}
 	}
 	if ver == container.VerR13 || ver == container.VerR14 || ver == container.VerR2000 {
 		// 按 R13/R14/R2000 字段布局解析并检查数据区结束位置；失败时尝试扫描解析。
-		if lc, err := decodeLayerRecordPreR2004(rec, objHandle, ver, cp); err == nil {
+		if lc, err = decodeLayerRecordPreR2004(rec, objHandle, ver, cp); err == nil {
+			lc.normalizeName()
 			return lc, nil
 		}
 	}
 	if rec.R2010Plus {
-		return decodeLayerRecordR2010Plus(rec, objHandle, ver)
+		lc, err = decodeLayerRecordR2010Plus(rec, objHandle, ver)
+	} else {
+		lc, err = scanLayerRecordClassic(rec, objHandle, ver, cp)
 	}
-	return scanLayerRecordClassic(rec, objHandle, ver, cp)
+	if err == nil {
+		lc.normalizeName()
+	}
+	return lc, err
 }
 
 // decodeLayerRecordR2010Plus 优先按 R2010 及之后版本的字段布局解析图层。

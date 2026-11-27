@@ -62,7 +62,7 @@ func SheetTexts(doc *drawing.Document, sheets []Sheet) []SheetText {
 // layerName 图层句柄 → 层表真名（LayerColor.Name 由各版本 LAYER 记录解析
 // 填充；句柄不在层表或层名未解析出时返回空串——导出不因层名缺失阻塞）。
 func layerName(doc *drawing.Document, h uint64) string {
-	return doc.LayerColors[h].Name
+	return doc.LayerColors[h].DisplayName()
 }
 
 // sheetIndexOf 插入点落框归属：返回首个包含该点的图框序号（1-based，
