@@ -1,12 +1,10 @@
 package render
 
 import (
-	"crypto/sha256"
-	"fmt"
+	"strings"
+
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
-	"os"
-	"strings"
 )
 
 // FontFace records the actual face, including explicit collection selection.
@@ -25,7 +23,7 @@ func (r *fontResolver) face(f *opentype.Font, path string) FontFace {
 	if info, ok := r.faces[f]; ok {
 		return info
 	}
-	name := func(id sfnt.NameID) string { v, _ := f.Name(nil, id); return v }
+	name := func(id sfnt.NameID) string { v, _ := f.Name(&r.buf, id); return v }
 	info := FontFace{Family: name(sfnt.NameIDFamily), Subfamily: name(sfnt.NameIDSubfamily), FullName: name(sfnt.NameIDFull), PostScript: name(sfnt.NameIDPostScript)}
 	// Weight is the font's declared style name, not a fabricated numeric weight.
 	info.Weight = info.Subfamily
@@ -34,9 +32,7 @@ func (r *fontResolver) face(f *opentype.Font, path string) FontFace {
 	file, _, _ := strings.Cut(path, "#")
 	digest, ok := r.hashes[file]
 	if !ok {
-		if b, e := os.ReadFile(file); e == nil {
-			digest = fmt.Sprintf("%x", sha256.Sum256(b))
-		}
+		digest = cachedFontSHA256(file)
 		r.hashes[file] = digest
 	}
 	info.SHA256 = digest

@@ -69,24 +69,26 @@ type Primitive struct {
 // An insertion-path check stops cycles; a global budget bounds expansion of
 // acyclic drawings with deeply repeated blocks.
 type Tessellator struct {
-	XrefPath      []XrefPlacement
-	Space         string
-	FrozenLayers  map[uint64]bool
-	Faithful      bool
-	Plot          bool
-	ViewportScale float64
-	Tolerance     float64
-	Diagnostics   []Diagnostic
-	instancePath  []uint64
-	parentStyle   ResolvedStyle
-	parentColor   entity.EntColor
-	parentLayer   uint64
-	Doc           *Document
-	maxDepth      int
-	Budget        int
-	insPath       []uint64 // 当前 INSERT 展开路径上的块定义句柄（环检测）
-	vertex2d      map[uint64]*entity.EntVertex2d
-	vertex3d      map[uint64]*entity.EntVertex3d
+	XrefPath       []XrefPlacement
+	Space          string
+	FrozenLayers   map[uint64]bool
+	Faithful       bool
+	Plot           bool
+	ViewportScale  float64
+	Tolerance      float64
+	Diagnostics    []Diagnostic
+	instancePath   []uint64
+	parentStyle    ResolvedStyle
+	parentColor    entity.EntColor
+	parentLayer    uint64
+	Doc            *Document
+	maxDepth       int
+	Budget         int
+	insPath        []uint64 // 当前 INSERT 展开路径上的块定义句柄（环检测）
+	vertex2d       map[uint64]*entity.EntVertex2d
+	vertex3d       map[uint64]*entity.EntVertex3d
+	sortKeys       map[uint64]uint64
+	sortKeysLoaded bool
 }
 
 // NewTessellator 为文档创建展开器，设置默认嵌套深度与实例预算。

@@ -30,7 +30,7 @@ func TestSceneInstancesBasePointAndUnreferenced(t *testing.T) {
 
 // TestSourceDrawOrder 验证场景按源文件的绘制顺序输出图元。
 func TestSourceDrawOrder(t *testing.T) {
-	d := &Document{InternalObjs: map[uint64]*object.ObjGeneric{99: {Name: "SORTENTSTABLE", Fields: []object.ObjField{{"num_ents", int64(2)}, {"ents[0]", int64(1)}, {"sort_ents[0]", int64(0)}, {"ents[1]", int64(3)}, {"sort_ents[1]", int64(1)}}}}}
+	d := &Document{InternalObjs: map[uint64]*object.ObjGeneric{99: {Name: "SORTENTSTABLE", Fields: []object.ObjField{{Key: "num_ents", Val: int64(2)}, {Key: "ents[0]", Val: int64(1)}, {Key: "sort_ents[0]", Val: int64(0)}, {Key: "ents[1]", Val: int64(3)}, {Key: "sort_ents[1]", Val: int64(1)}}}}}
 	out := d.OrderedEntities([]any{lineFor(1, 0), lineFor(2, 0), lineFor(3, 0)})
 	for i, h := range []uint64{3, 2, 1} {
 		if out[i].(entity.EntityCommon).Common().Handle != h {
@@ -41,7 +41,7 @@ func TestSourceDrawOrder(t *testing.T) {
 
 // TestByBlockStyleDoesNotSquareGlobalScale 验证 ByBlock 样式继承不会重复乘入全局线型比例。
 func TestByBlockStyleDoesNotSquareGlobalScale(t *testing.T) {
-	d := &Document{Ltscale: 3, LayerColors: map[uint64]LayerColor{1: {Name: "0", StyleKnown: true}, 2: {Name: "drawing", StyleKnown: true, Lineweight: 7, Ltype: 50, Index: 4}}, InternalObjs: map[uint64]*object.ObjGeneric{50: {Fields: []object.ObjField{{"dash_lengths", []float64{2, -1}}}}}}
+	d := &Document{Ltscale: 3, LayerColors: map[uint64]LayerColor{1: {Name: "0", StyleKnown: true}, 2: {Name: "drawing", StyleKnown: true, Lineweight: 7, Ltype: 50, Index: 4}}, InternalObjs: map[uint64]*object.ObjGeneric{50: {Fields: []object.ObjField{{Key: "dash_lengths", Val: []float64{2, -1}}}}}}
 	ts := NewTessellator(d)
 	parent, pc, pl := ts.resolveStyle(&entity.BaseEntity{Layer: 2, Head: &entity.CommonEntityHead{Linewt: 29, LtypeScale: 1}})
 	ts.parentStyle, ts.parentColor, ts.parentLayer = parent, pc, pl

@@ -42,6 +42,16 @@ type FontUse struct {
 	Handle                          uint64
 	Missing                         string
 }
+type fontRuneKey struct {
+	f *opentype.Font
+	r rune
+}
+
+type fontGlyphKey struct {
+	f   *opentype.Font
+	idx sfnt.GlyphIndex
+}
+
 type fontResolver struct {
 	faces     map[*opentype.Font]FontFace
 	hashes    map[string]string
@@ -49,11 +59,118 @@ type fontResolver struct {
 	cache     map[string]*opentype.Font
 	path      map[string]string
 	fallbacks []string
+	buf       sfnt.Buffer
+	scales    map[*opentype.Font]float64
+	glyphIdx  map[fontRuneKey]sfnt.GlyphIndex
+	glyphAdv  map[fontGlyphKey]float64
+	glyphSeg  map[fontGlyphKey]sfnt.Segments
 }
 
-// newFontResolver 创建单次渲染使用的字体解析器，初始化字体、路径和诊断缓存。
+// newFontResolver 创建单次渲染使用的字体解析器，初始化字体、路径、度量与诊断缓存。
 func newFontResolver(opts RenderOptions) *fontResolver {
-	return &fontResolver{faces: map[*opentype.Font]FontFace{}, hashes: map[string]string{}, opts: opts, cache: map[string]*opentype.Font{}, path: map[string]string{}, fallbacks: systemFontCandidates}
+	return &fontResolver{
+		faces:     map[*opentype.Font]FontFace{},
+		hashes:    map[string]string{},
+		opts:      opts,
+		cache:     map[string]*opentype.Font{},
+		path:      map[string]string{},
+		fallbacks: systemFontCandidates,
+		scales:    map[*opentype.Font]float64{},
+		glyphIdx:  map[fontRuneKey]sfnt.GlyphIndex{},
+		glyphAdv:  map[fontGlyphKey]float64{},
+		glyphSeg:  map[fontGlyphKey]sfnt.Segments{},
+	}
+}
+
+// fontScale 返回并缓存字体的 CAD 字高比例。
+func (r *fontResolver) fontScale(f *opentype.Font) float64 {
+	if f == nil {
+		return 1
+	}
+	if s, ok := r.scales[f]; ok {
+		return s
+	}
+	s := cadFontScaleWithBuf(f, &r.buf)
+	r.scales[f] = s
+	return s
+}
+
+// glyphIndex 查询并缓存 (字体, 字符) 对应的字形索引。
+func (r *fontResolver) glyphIndex(f *opentype.Font, ch rune) (sfnt.GlyphIndex, bool) {
+	if f == nil {
+		return 0, false
+	}
+	k := fontRuneKey{f: f, r: ch}
+	if idx, ok := r.glyphIdx[k]; ok {
+		return idx, true
+	}
+	idx, err := f.GlyphIndex(&r.buf, ch)
+	if err != nil {
+		return 0, false
+	}
+	r.glyphIdx[k] = idx
+	return idx, true
+}
+
+// glyphAdvance 查询并缓存 (字体, 字形索引) 的归一化推进宽。
+func (r *fontResolver) glyphAdvance(f *opentype.Font, ch rune) float64 {
+	if f == nil {
+		return .6
+	}
+	idx, ok := r.glyphIndex(f, ch)
+	if !ok {
+		return .6
+	}
+	k := fontGlyphKey{f: f, idx: idx}
+	if adv, ok := r.glyphAdv[k]; ok {
+		return adv
+	}
+	v, err := f.GlyphAdvance(&r.buf, idx, fixed.I(1024), font.HintingNone)
+	if err != nil {
+		return .6
+	}
+	adv := float64(v) / 65536
+	r.glyphAdv[k] = adv
+	return adv
+}
+
+// glyphSegments 查询并缓存 (字体, 字形索引) 的只读轮廓段切片。
+func (r *fontResolver) glyphSegments(f *opentype.Font, ch rune) (sfnt.Segments, bool) {
+	if f == nil {
+		return nil, false
+	}
+	idx, ok := r.glyphIndex(f, ch)
+	if !ok {
+		return nil, false
+	}
+	k := fontGlyphKey{f: f, idx: idx}
+	if seg, ok := r.glyphSeg[k]; ok {
+		return seg, true
+	}
+	seg, err := f.LoadGlyph(&r.buf, idx, fixed.I(1024), nil)
+	if err != nil {
+		return nil, false
+	}
+	copySeg := append(sfnt.Segments(nil), seg...)
+	r.glyphSeg[k] = copySeg
+	return copySeg, true
+}
+
+// kern 查询两个字符间的归一化字距，复用 resolver 内部的 sfnt.Buffer。
+func (r *fontResolver) kern(f *opentype.Font, a, b rune) float64 {
+	if f == nil {
+		return 0
+	}
+	ia, oka := r.glyphIndex(f, a)
+	ib, okb := r.glyphIndex(f, b)
+	if !oka || !okb {
+		return 0
+	}
+	k, err := f.Kern(&r.buf, ia, ib, fixed.I(1024), font.HintingNone)
+	if err != nil {
+		return 0
+	}
+	return float64(k) / 65536
 }
 
 // choose 按常规字重和非斜体要求选择字体，返回字体、实际路径及替换原因。
@@ -129,13 +246,19 @@ func (r *fontResolver) reason(name, path string) string {
 // cadFontScale 根据字体大写字高计算 CAD 字高到字形度量的比例。
 // 优先使用 CapHeight，再尝试 H 的字形边界；均不可用时返回 1。
 func cadFontScale(f *opentype.Font) float64 {
+	var buf sfnt.Buffer
+	return cadFontScaleWithBuf(f, &buf)
+}
+
+// cadFontScaleWithBuf 使用调用方提供的 sfnt.Buffer 计算字体的 CAD 字高比例。
+func cadFontScaleWithBuf(f *opentype.Font, buf *sfnt.Buffer) float64 {
 	if f != nil {
-		m, err := f.Metrics(nil, fixed.I(1024), font.HintingNone)
+		m, err := f.Metrics(buf, fixed.I(1024), font.HintingNone)
 		if err == nil && m.CapHeight > 0 {
 			return 65536 / float64(m.CapHeight)
 		}
-		if idx, e := f.GlyphIndex(nil, 'H'); e == nil && idx != 0 {
-			if bounds, _, e := f.GlyphBounds(nil, idx, fixed.I(1024), font.HintingNone); e == nil && bounds.Max.Y > bounds.Min.Y {
+		if idx, e := f.GlyphIndex(buf, 'H'); e == nil && idx != 0 {
+			if bounds, _, e := f.GlyphBounds(buf, idx, fixed.I(1024), font.HintingNone); e == nil && bounds.Max.Y > bounds.Min.Y {
 				return 65536 / float64(bounds.Max.Y-bounds.Min.Y)
 			}
 		}
@@ -246,28 +369,17 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 		widths = append(widths, 0)
 	}
 	advance := func(f *opentype.Font, ch rune) float64 {
-		if f == nil {
-			return .6
-		}
-		idx, e := f.GlyphIndex(nil, ch)
-		if e != nil {
-			return .6
-		}
-		v, e := f.GlyphAdvance(nil, idx, fixed.I(1024), font.HintingNone)
-		if e != nil {
-			return .6
-		}
-		return float64(v) / 65536
+		return res.glyphAdvance(f, ch)
 	}
 	inkRight := func(f *opentype.Font, ch rune) float64 {
 		if f == nil {
 			return .6
 		}
-		idx, e := f.GlyphIndex(nil, ch)
-		if e != nil {
+		idx, ok := res.glyphIndex(f, ch)
+		if !ok {
 			return advance(f, ch)
 		}
-		b, _, e := f.GlyphBounds(nil, idx, fixed.I(1024), font.HintingNone)
+		b, _, e := f.GlyphBounds(&res.buf, idx, fixed.I(1024), font.HintingNone)
 		if e != nil {
 			return advance(f, ch)
 		}
@@ -277,11 +389,11 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 		if f == nil {
 			return 0
 		}
-		idx, e := f.GlyphIndex(nil, ch)
-		if e != nil {
+		idx, ok := res.glyphIndex(f, ch)
+		if !ok {
 			return 0
 		}
-		b, _, e := f.GlyphBounds(nil, idx, fixed.I(1024), font.HintingNone)
+		b, _, e := f.GlyphBounds(&res.buf, idx, fixed.I(1024), font.HintingNone)
 		if e != nil {
 			return 0
 		}
@@ -313,21 +425,21 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 			}
 			gf, gpath := f, path
 			if gf != nil {
-				idx, e := gf.GlyphIndex(nil, ch)
-				if e != nil || idx == 0 {
+				idx, ok := res.glyphIndex(gf, ch)
+				if !ok || idx == 0 {
 					for _, alt := range res.fallbacks {
 						af := res.fallback(alt)
 						if af == nil {
 							continue
 						}
-						ii, ee := af.GlyphIndex(nil, ch)
-						if ee == nil && ii != 0 {
+						ii, okAlt := res.glyphIndex(af, ch)
+						if okAlt && ii != 0 {
 							gf = af
 							gpath = alt
 							break
 						}
 					}
-					ii, _ := gf.GlyphIndex(nil, ch)
+					ii, _ := res.glyphIndex(gf, ch)
 					if ii == 0 {
 						missing += string(ch)
 					}
@@ -347,11 +459,11 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 			if track <= 0 {
 				track = 1
 			}
-			emSize := sz * cadFontScale(gf)
+			emSize := sz * res.fontScale(gf)
 			aw := advance(gf, ch) * emSize * effectiveWidth(run) * track
 			kern := 0.0
 			if previousFont == gf && gf != nil {
-				kern = glyphKern(gf, previous, ch) * emSize * effectiveWidth(run)
+				kern = res.kern(gf, previous, ch) * emSize * effectiveWidth(run)
 			}
 			cursor += kern
 			if ch == '\t' {
@@ -383,7 +495,7 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 						wrapWidth += advance(gf, chars[j]) * emSize * effectiveWidth(run) * track
 					}
 					if j > ci {
-						wrapWidth += glyphKern(gf, chars[j-1], chars[j]) * emSize * effectiveWidth(run)
+						wrapWidth += res.kern(gf, chars[j-1], chars[j]) * emSize * effectiveWidth(run)
 					}
 				}
 			}
@@ -438,10 +550,10 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 			f, _, _ := res.choose(tx.FontName)
 			w1, w2 := 0.0, 0.0
 			for _, c := range run.Top {
-				w1 += advance(f, c) * cadFontScale(f) * h * rh * .7 * effectiveWidth(run)
+				w1 += advance(f, c) * res.fontScale(f) * h * rh * .7 * effectiveWidth(run)
 			}
 			for _, c := range run.Bottom {
-				w2 += advance(f, c) * cadFontScale(f) * h * rh * .7 * effectiveWidth(run)
+				w2 += advance(f, c) * res.fontScale(f) * h * rh * .7 * effectiveWidth(run)
 			}
 			w := math.Max(w1, w2)
 			if run.StackMode == '/' {
@@ -490,12 +602,10 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 		if g.f == nil {
 			continue
 		}
-		idx, _ := g.f.GlyphIndex(nil, g.r)
-		seg, e := g.f.LoadGlyph(nil, idx, fixed.I(1024), nil)
-		if e != nil {
+		copySeg, ok := res.glyphSegments(g.f, g.r)
+		if !ok {
 			continue
 		}
-		copySeg := append(sfnt.Segments(nil), seg...)
 		if len(copySeg) > 0 {
 			if g.line < firstInkLine {
 				firstInkLine = g.line
@@ -588,7 +698,7 @@ func layoutFaithfulText(p drawing.Primitive, res *fontResolver) (textLayoutPlan,
 		a := g.h * g.w
 		b := math.Tan(g.slant) * g.h
 		matrix := [6]float64{ux * a, uy * a, -ux*b - vx*g.h, -uy*b - vy*g.h, origin.X, origin.Y}
-		item := laidGlyph{ColorIndex: g.colorIndex, TrueColor: g.trueColor, Rune: g.r, Font: g.path, Size: g.h / cadFontScale(g.f), Matrix: matrix}
+		item := laidGlyph{ColorIndex: g.colorIndex, TrueColor: g.trueColor, Rune: g.r, Font: g.path, Size: g.h / res.fontScale(g.f), Matrix: matrix}
 		for _, s := range o.seg {
 			pc := pathCommand{Op: 'M'}
 			n := 1

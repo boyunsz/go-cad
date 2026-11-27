@@ -602,6 +602,16 @@ func DecodeCodepage(b []byte, codepage uint16) string {
 	if len(b) == 0 {
 		return ""
 	}
+	ascii := true
+	for _, c := range b {
+		if c >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return string(b)
+	}
 	switch codepage {
 	case 0, 1:
 		return string(b)

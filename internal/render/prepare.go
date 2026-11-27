@@ -68,7 +68,7 @@ func prepareDrawing(doc *drawing.Document, opts RenderOptions, refined bool) (*P
 		return nil, fmt.Errorf("cad: nil document")
 	}
 	var xrefErr error
-	doc, xrefErr = bindExternalDrawings(doc, opts.XrefFiles)
+	doc, xrefErr = bindExternalDrawings(doc, opts.XrefFiles, opts.XrefLoader)
 	if xrefErr != nil {
 		return nil, xrefErr
 	}

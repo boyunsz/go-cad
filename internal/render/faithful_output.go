@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"fmt"
 	"github.com/boyunsz/go-cad/internal/drawing"
 	"github.com/boyunsz/go-cad/internal/entity"
 	"image"
@@ -17,20 +16,46 @@ import (
 	"strings"
 )
 
-// num 以六位小数序列化 SVG 数值，把舍入后接近零的值统一写为正零。
-func num(v float64) string {
+// appendNum 以六位小数将 SVG 数值追加到 dst，把舍入后接近零的值统一写为正零。
+func appendNum(dst []byte, v float64) []byte {
 	if math.Abs(v) < .0000005 {
 		v = 0
 	}
-	return strconv.FormatFloat(v, 'f', 6, 64)
+	return strconv.AppendFloat(dst, v, 'f', 6, 64)
+}
+
+// num 以六位小数序列化 SVG 数值，把舍入后接近零的值统一写为正零。
+func num(v float64) string {
+	var buf [32]byte
+	return string(appendNum(buf[:0], v))
 }
 
 // esc 转义 XML 文本和属性中的特殊字符，返回可嵌入 SVG 的字符串。
-func esc(s string) string { var b bytes.Buffer; _ = xml.EscapeText(&b, []byte(s)); return b.String() }
+// 无 XML 特殊字符时直接返回原字符串，避免不必要的内存分配。
+func esc(s string) string {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '&', '<', '>', '"', '\'', '\t', '\n', '\r':
+			var b bytes.Buffer
+			b.Grow(len(s) + 8)
+			_ = xml.EscapeText(&b, []byte(s))
+			return b.String()
+		}
+	}
+	return s
+}
 
-// svgPoint 把图纸坐标平移到 SVG 视口原点并翻转 Y 轴，输出坐标数值对。
-func (p *PreparedDrawing) svgPoint(q entity.Point2) string {
-	return num(q.X-p.Audit.Bounds.MinX) + " " + num(p.Audit.Bounds.MaxY-q.Y)
+// appendHexColor 以 #rrggbb 格式将颜色追加到 dst。
+func appendHexColor(dst []byte, c color.RGBA) []byte {
+	const hex = "0123456789abcdef"
+	return append(dst, '#', hex[c.R>>4], hex[c.R&15], hex[c.G>>4], hex[c.G&15], hex[c.B>>4], hex[c.B&15])
+}
+
+// appendSVGPoint 把图纸坐标平移到 SVG 视口原点并翻转 Y 轴，直接追加到 dst。
+func (p *PreparedDrawing) appendSVGPoint(dst []byte, q entity.Point2) []byte {
+	dst = appendNum(dst, q.X-p.Audit.Bounds.MinX)
+	dst = append(dst, ' ')
+	return appendNum(dst, p.Audit.Bounds.MaxY-q.Y)
 }
 
 // geometryPath 将解析几何序列化为连续 SVG 路径，保留直线、三次曲线和椭圆弧。
@@ -41,22 +66,33 @@ func (p *PreparedDrawing) geometryPath(g *drawing.Geometry) string {
 // geometryPathWithDash 序列化解析曲线，并按 dashed 和原多段线设置决定是否在顶点重启子路径。
 // 椭圆弧由仿射轴还原半轴和方向；退化弧按直线输出。
 func (p *PreparedDrawing) geometryPathWithDash(g *drawing.Geometry, dashed bool) string {
+	return string(p.appendGeometryPathWithDash(make([]byte, 0, len(g.Segments)*32), g, dashed))
+}
+
+// appendGeometryPathWithDash 将解析几何路径直接追加到 dst，避免中间字符串分配。
+func (p *PreparedDrawing) appendGeometryPathWithDash(dst []byte, g *drawing.Geometry, dashed bool) []byte {
 	reset := dashed && g.ResetDashEachSegment
-	var b strings.Builder
 	var prev entity.Point2
 	has := false
 	for _, s := range g.Segments {
 		if reset || !has || math.Hypot(prev.X-s.P0.X, prev.Y-s.P0.Y) > 1e-8 {
-			b.WriteString("M" + p.svgPoint(s.P0))
+			dst = append(dst, 'M')
+			dst = p.appendSVGPoint(dst, s.P0)
 		}
 		if s.Cubic {
-			b.WriteString("C" + p.svgPoint(s.C1) + " " + p.svgPoint(s.C2) + " " + p.svgPoint(s.P1))
+			dst = append(dst, 'C')
+			dst = p.appendSVGPoint(dst, s.C1)
+			dst = append(dst, ' ')
+			dst = p.appendSVGPoint(dst, s.C2)
+			dst = append(dst, ' ')
+			dst = p.appendSVGPoint(dst, s.P1)
 			prev = s.P1
 			has = true
 			continue
 		}
 		if !s.Arc {
-			b.WriteString("L" + p.svgPoint(s.P1))
+			dst = append(dst, 'L')
+			dst = p.appendSVGPoint(dst, s.P1)
 			prev = s.P1
 			has = true
 			continue
@@ -72,9 +108,9 @@ func (p *PreparedDrawing) geometryPathWithDash(g *drawing.Geometry, dashed bool)
 		if parts < 1 {
 			parts = 1
 		}
-		sweep := 0
+		sweep := byte('0')
 		if s.Sweep*(ux*vy-uy*vx) > 0 {
-			sweep = 1
+			sweep = '1'
 		}
 		for j := 1; j <= parts; j++ {
 			q := s.Point(s.Start + s.Sweep*float64(j)/float64(parts))
@@ -82,23 +118,35 @@ func (p *PreparedDrawing) geometryPathWithDash(g *drawing.Geometry, dashed bool)
 				q = s.P1
 			}
 			if rx < 1e-12 || ry < 1e-12 {
-				b.WriteString("L" + p.svgPoint(q))
+				dst = append(dst, 'L')
+				dst = p.appendSVGPoint(dst, q)
 			} else {
-				fmt.Fprintf(&b, "A%s %s %s 0 %d %s", num(rx), num(ry), num(angle), sweep, p.svgPoint(q))
+				dst = append(dst, 'A')
+				dst = appendNum(dst, rx)
+				dst = append(dst, ' ')
+				dst = appendNum(dst, ry)
+				dst = append(dst, ' ')
+				dst = appendNum(dst, angle)
+				dst = append(dst, ' ', '0', ' ', sweep, ' ')
+				dst = p.appendSVGPoint(dst, q)
 			}
 		}
 		prev = s.P1
 		has = true
 	}
 	if g.Closed && has && !reset {
-		b.WriteByte('Z')
+		dst = append(dst, 'Z')
 	}
-	return b.String()
+	return dst
 }
 
 // strokePath 把有限线段序列化为 SVG 路径，连续端点共享子路径，非有限坐标跳过。
 func (p *PreparedDrawing) strokePath(st []drawing.Stroke) string {
-	var b strings.Builder
+	return string(p.appendStrokePath(make([]byte, 0, len(st)*32), st))
+}
+
+// appendStrokePath 将有限线段路径直接追加到 dst，避免中间字符串分配。
+func (p *PreparedDrawing) appendStrokePath(dst []byte, st []drawing.Stroke) []byte {
 	var prev entity.Point2
 	has := false
 	for _, s := range st {
@@ -107,13 +155,15 @@ func (p *PreparedDrawing) strokePath(st []drawing.Stroke) string {
 			continue
 		}
 		if !has || a != prev {
-			b.WriteString("M" + p.svgPoint(a))
+			dst = append(dst, 'M')
+			dst = p.appendSVGPoint(dst, a)
 		}
-		b.WriteString("L" + p.svgPoint(c))
+		dst = append(dst, 'L')
+		dst = p.appendSVGPoint(dst, c)
 		prev = c
 		has = true
 	}
-	return b.String()
+	return dst
 }
 
 // dashArray 将 CAD 的有符号划线/间隔序列转换为 SVG stroke-dasharray。
@@ -140,22 +190,29 @@ func dashArray(ds []float64, dot float64) string {
 	if len(result)%2 != 0 {
 		result = append(result, 0)
 	}
-	vals := make([]string, len(result))
+	buf := make([]byte, 0, len(result)*12)
 	for i, v := range result {
-		vals[i] = num(v)
+		if i > 0 {
+			buf = append(buf, ' ')
+		}
+		buf = appendNum(buf, v)
 	}
-	return strings.Join(vals, " ")
+	return string(buf)
 }
 
 // outlinePath 把世界坐标字形轮廓序列化为 SVG 路径，并闭合每个轮廓子路径。
 func (p *PreparedDrawing) outlinePath(cmds []pathCommand) string {
-	var b strings.Builder
+	return string(p.appendOutlinePath(make([]byte, 0, len(cmds)*24), cmds))
+}
+
+// appendOutlinePath 将字形轮廓路径直接追加到 dst，避免中间字符串分配。
+func (p *PreparedDrawing) appendOutlinePath(dst []byte, cmds []pathCommand) []byte {
 	open := false
 	for _, c := range cmds {
 		if c.Op == 'M' && open {
-			b.WriteByte('Z')
+			dst = append(dst, 'Z')
 		}
-		b.WriteByte(c.Op)
+		dst = append(dst, c.Op)
 		n := 1
 		if c.Op == 'Q' {
 			n = 2
@@ -165,31 +222,44 @@ func (p *PreparedDrawing) outlinePath(cmds []pathCommand) string {
 		}
 		for i := 0; i < n; i++ {
 			if i > 0 {
-				b.WriteByte(' ')
+				dst = append(dst, ' ')
 			}
-			b.WriteString(p.svgPoint(c.P[i]))
+			dst = p.appendSVGPoint(dst, c.P[i])
 		}
 		open = true
 	}
 	if open {
-		b.WriteByte('Z')
+		dst = append(dst, 'Z')
 	}
-	return b.String()
+	return dst
 }
 
 // SVG 将已准备的渲染计划输出为 SVG，包含视口裁切、字体轮廓或文本及诊断元数据。
 // 不重新解析 DWG；返回的字节可直接写入文件。
 func (p *PreparedDrawing) SVG() ([]byte, error) {
-	var b strings.Builder
+	est := len(p.Primitives)*192 + p.Audit.Glyphs*320 + 4096
+	b := make([]byte, 0, est)
 	box := p.Audit.Bounds
-	fmt.Fprintf(&b, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %s %s\" width=\"%d\" height=\"%d\">\n", num(box.MaxX-box.MinX), num(box.MaxY-box.MinY), p.Audit.Width, p.Audit.Height)
+	b = append(b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `...)
+	b = appendNum(b, box.MaxX-box.MinX)
+	b = append(b, ' ')
+	b = appendNum(b, box.MaxY-box.MinY)
+	b = append(b, `" width="`...)
+	b = strconv.AppendInt(b, int64(p.Audit.Width), 10)
+	b = append(b, `" height="`...)
+	b = strconv.AppendInt(b, int64(p.Audit.Height), 10)
+	b = append(b, "\">\n"...)
 	meta, _ := json.Marshal(struct {
 		Generator string
 		Audit     RenderAudit
 	}{"go-cad-faithful", p.Audit})
-	b.WriteString("<metadata>" + esc(string(meta)) + "</metadata>\n")
+	b = append(b, "<metadata>"...)
+	b = append(b, esc(string(meta))...)
+	b = append(b, "</metadata>\n"...)
 	bg := p.Options.Background
-	fmt.Fprintf(&b, "<rect width=\"100%%\" height=\"100%%\" fill=\"#%02x%02x%02x\"/>\n", bg.R, bg.G, bg.B)
+	b = append(b, `<rect width="100%" height="100%" fill="`...)
+	b = appendHexColor(b, bg)
+	b = append(b, "\"/>\n"...)
 	clipIDs := map[*drawing.Box2]int{}
 	for _, e := range p.Primitives {
 		if e.Clip != nil {
@@ -197,81 +267,171 @@ func (p *PreparedDrawing) SVG() ([]byte, error) {
 				id := len(clipIDs)
 				clipIDs[e.Clip] = id
 				q := e.Clip
-				fmt.Fprintf(&b, "<defs><clipPath id=\"vp%d\"><rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\"/></clipPath></defs>\n", id, num(q.MinX-box.MinX), num(box.MaxY-q.MaxY), num(q.MaxX-q.MinX), num(q.MaxY-q.MinY))
+				b = append(b, `<defs><clipPath id="vp`...)
+				b = strconv.AppendInt(b, int64(id), 10)
+				b = append(b, `"><rect x="`...)
+				b = appendNum(b, q.MinX-box.MinX)
+				b = append(b, `" y="`...)
+				b = appendNum(b, box.MaxY-q.MaxY)
+				b = append(b, `" width="`...)
+				b = appendNum(b, q.MaxX-q.MinX)
+				b = append(b, `" height="`...)
+				b = appendNum(b, q.MaxY-q.MinY)
+				b = append(b, "\"/></clipPath></defs>\n"...)
 			}
 		}
 	}
+	var pathBuf []byte
 	for i, e := range p.Primitives {
 		if e.Clip != nil {
-			fmt.Fprintf(&b, "<g clip-path=\"url(#vp%d)\">\n", clipIDs[e.Clip])
+			b = append(b, `<g clip-path="url(#vp`...)
+			b = strconv.AppendInt(b, int64(clipIDs[e.Clip]), 10)
+			b = append(b, ")\">\n"...)
 		}
 		c := p.color(e)
-		hex := fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)
 		layer := primitiveDocument(p.Doc, e).LayerColors[e.Layer].DisplayName()
-		fileAttr := ""
+		b = append(b, `<g data-h="`...)
+		b = append(b, strings.ToUpper(strconv.FormatUint(e.Source.Handle, 16))...)
+		b = append(b, `" data-instance="`...)
+		b = strconv.AppendInt(b, int64(i), 10)
+		b = append(b, `" data-type="`...)
+		b = append(b, esc(e.Source.Type)...)
+		b = append(b, `" data-layer="`...)
+		b = append(b, esc(layer)...)
+		b = append(b, '"')
 		if e.Source.File != "" {
-			fileAttr = " data-source-file=\"" + esc(e.Source.File) + "\""
+			b = append(b, ` data-source-file="`...)
+			b = append(b, esc(e.Source.File)...)
+			b = append(b, '"')
 		}
-		fmt.Fprintf(&b, "<g data-h=\"%X\" data-instance=\"%d\" data-type=\"%s\" data-layer=\"%s\"%s>\n", e.Source.Handle, i, esc(e.Source.Type), esc(layer), fileAttr)
+		b = append(b, ">\n"...)
 		switch e.Kind {
 		case 4:
 			if im := p.Images[i]; im != nil {
 				m := im.Matrix
-				fmt.Fprintf(&b, "<image width=\"%d\" height=\"%d\" href=\"data:image/png;base64,%s\" transform=\"matrix(%s %s %s %s %s %s)\"/>\n", im.Pixels.Bounds().Dx(), im.Pixels.Bounds().Dy(), im.Encoded, num(m[0]), num(-m[1]), num(m[2]), num(-m[3]), num(m[4]-box.MinX), num(box.MaxY-m[5]))
+				b = append(b, `<image width="`...)
+				b = strconv.AppendInt(b, int64(im.Pixels.Bounds().Dx()), 10)
+				b = append(b, `" height="`...)
+				b = strconv.AppendInt(b, int64(im.Pixels.Bounds().Dy()), 10)
+				b = append(b, `" href="data:image/png;base64,`...)
+				b = append(b, im.Encoded...)
+				b = append(b, `" transform="matrix(`...)
+				b = appendNum(b, m[0])
+				b = append(b, ' ')
+				b = appendNum(b, -m[1])
+				b = append(b, ' ')
+				b = appendNum(b, m[2])
+				b = append(b, ' ')
+				b = appendNum(b, -m[3])
+				b = append(b, ' ')
+				b = appendNum(b, m[4]-box.MinX)
+				b = append(b, ' ')
+				b = appendNum(b, box.MaxY-m[5])
+				b = append(b, ")\"/>\n"...)
 			}
 		case 0:
-			d := p.strokePath(e.Strokes)
+			pathBuf = pathBuf[:0]
 			if e.Geometry != nil {
-				d = p.geometryPathWithDash(e.Geometry, len(e.Style.Dash) > 0)
+				pathBuf = p.appendGeometryPathWithDash(pathBuf, e.Geometry, len(e.Style.Dash) > 0)
+			} else {
+				pathBuf = p.appendStrokePath(pathBuf, e.Strokes)
 			}
-			if d != "" {
-				fmt.Fprintf(&b, "<path d=\"%s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\" stroke-linecap=\"round\" stroke-linejoin=\"round\"", d, hex, num(p.strokeWidth(e)))
-				if ds := dashArray(e.Style.Dash, p.strokeWidth(e)); ds != "" {
-					fmt.Fprintf(&b, " stroke-dasharray=\"%s\"", ds)
+			if len(pathBuf) > 0 {
+				b = append(b, `<path d="`...)
+				b = append(b, pathBuf...)
+				b = append(b, `" fill="none" stroke="`...)
+				b = appendHexColor(b, c)
+				b = append(b, `" stroke-width="`...)
+				sw := p.strokeWidth(e)
+				b = appendNum(b, sw)
+				b = append(b, `" stroke-linecap="round" stroke-linejoin="round"`...)
+				if ds := dashArray(e.Style.Dash, sw); ds != "" {
+					b = append(b, ` stroke-dasharray="`...)
+					b = append(b, ds...)
+					b = append(b, '"')
 				}
-				b.WriteString("/>\n")
+				b = append(b, "/>\n"...)
 			}
 		case 2:
-			var d strings.Builder
+			b = append(b, `<path d="`...)
 			for _, l := range hatchLoops(e.Fill) {
 				if len(l) < 3 {
 					continue
 				}
-				d.WriteString("M" + p.svgPoint(l[0]))
+				b = append(b, 'M')
+				b = p.appendSVGPoint(b, l[0])
 				for _, q := range l[1:] {
-					d.WriteString("L" + p.svgPoint(q))
+					b = append(b, 'L')
+					b = p.appendSVGPoint(b, q)
 				}
-				d.WriteByte('Z')
+				b = append(b, 'Z')
 			}
-			fmt.Fprintf(&b, "<path d=\"%s\" fill=\"%s\" fill-rule=\"evenodd\"/>\n", d.String(), hex)
+			b = append(b, `" fill="`...)
+			b = appendHexColor(b, c)
+			b = append(b, "\" fill-rule=\"evenodd\"/>\n"...)
 		case 1:
 			layout := p.Texts[i]
-			fmt.Fprintf(&b, "<g aria-label=\"%s\" fill=\"%s\"><title>%s</title>\n", esc(e.Lb.Text), hex, esc(e.Lb.Text))
+			escText := esc(e.Lb.Text)
+			b = append(b, `<g aria-label="`...)
+			b = append(b, escText...)
+			b = append(b, `" fill="`...)
+			b = appendHexColor(b, c)
+			b = append(b, `"><title>`...)
+			b = append(b, escText...)
+			b = append(b, "</title>\n"...)
 			if p.Options.TextMode == "path" {
 				for _, g := range layout.Glyphs {
-					c := p.glyphColor(e, g)
-					fmt.Fprintf(&b, "<path fill=\"#%02x%02x%02x\" d=\"%s\"/>\n", c.R, c.G, c.B, p.outlinePath(g.Path))
+					gc := p.glyphColor(e, g)
+					b = append(b, `<path fill="`...)
+					b = appendHexColor(b, gc)
+					b = append(b, `" d="`...)
+					b = p.appendOutlinePath(b, g.Path)
+					b = append(b, "\"/>\n"...)
 				}
 			} else {
 				for _, g := range layout.Glyphs {
 					m := g.Matrix
 					gc := p.glyphColor(e, g)
 					// Browser text uses upward glyph coordinates relative to the baseline.
-					fmt.Fprintf(&b, "<text fill=\"#%02x%02x%02x\" font-size=\"1\" font-family=\"%s\" transform=\"matrix(%s %s %s %s %s %s)\">%s</text>\n", gc.R, gc.G, gc.B, esc(strings.TrimSuffix(filepath.Base(g.Font), filepath.Ext(g.Font))), num(m[0]), num(-m[1]), num(m[2]), num(-m[3]), num(m[4]-box.MinX), num(box.MaxY-m[5]), esc(string(g.Rune)))
+					b = append(b, `<text fill="`...)
+					b = appendHexColor(b, gc)
+					b = append(b, `" font-size="1" font-family="`...)
+					b = append(b, esc(strings.TrimSuffix(filepath.Base(g.Font), filepath.Ext(g.Font)))...)
+					b = append(b, `" transform="matrix(`...)
+					b = appendNum(b, m[0])
+					b = append(b, ' ')
+					b = appendNum(b, -m[1])
+					b = append(b, ' ')
+					b = appendNum(b, m[2])
+					b = append(b, ' ')
+					b = appendNum(b, -m[3])
+					b = append(b, ' ')
+					b = appendNum(b, m[4]-box.MinX)
+					b = append(b, ' ')
+					b = appendNum(b, box.MaxY-m[5])
+					b = append(b, `)">`...)
+					b = append(b, esc(string(g.Rune))...)
+					b = append(b, "</text>\n"...)
 				}
 			}
 			if len(layout.Decor) > 0 {
-				fmt.Fprintf(&b, "<path d=\"%s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\"/>", p.strokePath(layout.Decor), hex, num(e.Lb.H*.04))
+				b = append(b, `<path d="`...)
+				b = p.appendStrokePath(b, layout.Decor)
+				b = append(b, `" fill="none" stroke="`...)
+				b = appendHexColor(b, c)
+				b = append(b, `" stroke-width="`...)
+				b = appendNum(b, e.Lb.H*.04)
+				b = append(b, `"/>`...)
 			}
-			b.WriteString("</g>\n")
+			b = append(b, "</g>\n"...)
 		}
-		b.WriteString("</g>\n")
+		b = append(b, "</g>\n"...)
 		if e.Clip != nil {
-			b.WriteString("</g>\n")
+			b = append(b, "</g>\n"...)
 		}
 	}
-	b.WriteString("</svg>\n")
-	return []byte(b.String()), nil
+	b = append(b, "</svg>\n"...)
+	return b, nil
 }
 
 // PNG 按已准备的画布尺寸绘制几何、字形和图片，应用视口裁切后编码为 PNG。

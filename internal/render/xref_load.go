@@ -16,11 +16,11 @@ type XrefUse struct {
 	SourceEntities, Skipped     int
 }
 
-// bindExternalDrawings 按显式映射递归读取外部 DWG，并把引用绑定到主文档的浅拷贝。
-// 映射键按文件基名忽略大小写匹配；同路径只解析一次以处理重复和循环引用。
+// bindExternalDrawings 按显式映射或自定义加载器递归读取外部 DWG，并把引用绑定到主文档的浅拷贝。
+// 映射键按文件基名忽略大小写匹配；同路径/键只解析一次以处理重复和循环引用。
 // 歧义映射或文件读取/解析失败返回错误，不复制或移动外部文件。
-func bindExternalDrawings(doc *drawing.Document, files map[string]string) (*drawing.Document, error) {
-	if len(files) == 0 || doc.Xrefs != nil {
+func bindExternalDrawings(doc *drawing.Document, files map[string]string, loader func(name, declaredPath string) ([]byte, error)) (*drawing.Document, error) {
+	if (len(files) == 0 && loader == nil) || doc.Xrefs != nil {
 		return doc, nil
 	}
 	key := func(s string) string {
@@ -57,27 +57,48 @@ func bindExternalDrawings(doc *drawing.Document, files map[string]string) (*draw
 			if declared == "" {
 				continue
 			}
+			name, _ := g.Field("name").(string)
 			path := paths[key(declared)]
 			if path == "" {
-				name, _ := g.Field("name").(string)
 				path = paths[key(name)]
 			}
-			if path == "" {
+			cacheKey := path
+			if cacheKey == "" && loader != nil {
+				cacheKey = "loader:" + key(declared)
+				if cacheKey == "loader:" {
+					cacheKey = "loader:" + key(name)
+				}
+			}
+			if cacheKey == "" {
 				continue
 			}
-			resource := cache[path]
+			resource := cache[cacheKey]
 			if resource == nil {
-				b, e := os.ReadFile(path)
-				if e != nil {
-					return fmt.Errorf("external DWG %s: %w", path, e)
+				var b []byte
+				var e error
+				sourceLabel := path
+				if path != "" {
+					b, e = os.ReadFile(path)
+					if e != nil {
+						return fmt.Errorf("external DWG %s: %w", path, e)
+					}
+				} else if loader != nil {
+					b, e = loader(name, declared)
+					if e != nil {
+						return fmt.Errorf("external DWG %s: %w", declared, e)
+					}
+					if len(b) == 0 {
+						continue
+					}
+					sourceLabel = declared
 				}
 				parsed, e := drawing.Parse(b)
 				if e != nil {
-					return fmt.Errorf("external DWG %s: %w", path, e)
+					return fmt.Errorf("external DWG %s: %w", sourceLabel, e)
 				}
-				parsed.SourceFile = path
-				resource = &drawing.XrefDocument{Document: parsed, Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256(b))}
-				cache[path] = resource
+				parsed.SourceFile = sourceLabel
+				resource = &drawing.XrefDocument{Document: parsed, Path: sourceLabel, SHA256: fmt.Sprintf("%x", sha256.Sum256(b))}
+				cache[cacheKey] = resource
 				if e = bind(parsed); e != nil {
 					return e
 				}

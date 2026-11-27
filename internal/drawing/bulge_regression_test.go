@@ -19,14 +19,14 @@ func nearPoint(t *testing.T, got, want entity.Point2) {
 func TestBulgeDirectionAndMajorArc(t *testing.T) {
 	for _, b := range []float64{0.01, -0.01, 0.1, -0.1, 1, -1, 2, -2} {
 		t.Run(fmt.Sprint(b), func(t *testing.T) {
-			e := &entity.EntLwPolyline{Vertices: []entity.Point2{{0, 0}, {10, 0}}, Bulges: []float64{b}}
+			e := &entity.EntLwPolyline{Vertices: []entity.Point2{{X: 0, Y: 0}, {X: 10, Y: 0}}, Bulges: []float64{b}}
 			strokes := TessLwPolyline(e, IdentityXform())
 			if len(strokes) == 0 {
 				t.Fatal("missing arc")
 			}
-			nearPoint(t, entity.Point2{strokes[0].X1, strokes[0].Y1}, e.Vertices[0])
+			nearPoint(t, entity.Point2{X: strokes[0].X1, Y: strokes[0].Y1}, e.Vertices[0])
 			last := strokes[len(strokes)-1]
-			nearPoint(t, entity.Point2{last.X2, last.Y2}, e.Vertices[1])
+			nearPoint(t, entity.Point2{X: last.X2, Y: last.Y2}, e.Vertices[1])
 			low, high := 0.0, 0.0
 			for _, s := range strokes {
 				low = math.Min(low, math.Min(s.Y1, s.Y2))
@@ -46,7 +46,7 @@ func TestBulgeDirectionAndMajorArc(t *testing.T) {
 // TestBulgeTransformAppliedOnce 验证 bulge 圆弧只应用一次实例变换，避免重复缩放或平移。
 func TestBulgeTransformAppliedOnce(t *testing.T) {
 	for _, b := range []float64{0.1, -0.1, 2, -2} {
-		e := &entity.EntLwPolyline{Vertices: []entity.Point2{{2, 3}, {12, 3}}, Bulges: []float64{b}}
+		e := &entity.EntLwPolyline{Vertices: []entity.Point2{{X: 2, Y: 3}, {X: 12, Y: 3}}, Bulges: []float64{b}}
 		local := TessLwPolyline(e, IdentityXform())
 		transforms := []Xform{
 			{Sx: 1, Sy: 1, Cos: 1, Tx: 100, Ty: -40},
@@ -59,8 +59,8 @@ func TestBulgeTransformAppliedOnce(t *testing.T) {
 				t.Fatal("transform changed segment count")
 			}
 			for i, s := range local {
-				nearPoint(t, entity.Point2{got[i].X1, got[i].Y1}, tr.Apply(entity.Point2{s.X1, s.Y1}))
-				nearPoint(t, entity.Point2{got[i].X2, got[i].Y2}, tr.Apply(entity.Point2{s.X2, s.Y2}))
+				nearPoint(t, entity.Point2{X: got[i].X1, Y: got[i].Y1}, tr.Apply(entity.Point2{X: s.X1, Y: s.Y1}))
+				nearPoint(t, entity.Point2{X: got[i].X2, Y: got[i].Y2}, tr.Apply(entity.Point2{X: s.X2, Y: s.Y2}))
 			}
 		}
 	}
@@ -69,12 +69,12 @@ func TestBulgeTransformAppliedOnce(t *testing.T) {
 // TestHatchBulgeFollowsSameGeometry 验证 HATCH 的 bulge 边界与普通多段线使用一致的弧段几何。
 func TestHatchBulgeFollowsSameGeometry(t *testing.T) {
 	for _, b := range []float64{0.1, -0.1, 1, -1, 2, -2} {
-		pts := entity.PolylineWithBulges([]entity.Point2{{0, 0}, {10, 0}}, []float64{b}, false, 64)
+		pts := entity.PolylineWithBulges([]entity.Point2{{X: 0, Y: 0}, {X: 10, Y: 0}}, []float64{b}, false, 64)
 		if len(pts) == 0 {
 			t.Fatal("missing hatch path")
 		}
-		nearPoint(t, pts[0], entity.Point2{0, 0})
-		nearPoint(t, pts[len(pts)-1], entity.Point2{10, 0})
+		nearPoint(t, pts[0], entity.Point2{X: 0, Y: 0})
+		nearPoint(t, pts[len(pts)-1], entity.Point2{X: 10, Y: 0})
 		for _, p := range pts {
 			if b*p.Y > 1e-7 || math.Abs(p.Y) > 5*math.Abs(b)+1e-7 {
 				t.Fatalf("hatch bulge %g escaped arc: %+v", b, p)

@@ -18,16 +18,17 @@ import (
 
 // RenderOptions 渲染参数。
 type RenderOptions struct {
-	XrefFiles      map[string]string // explicit DWG basename/block name -> local DWG; no implicit network lookup
-	Plot           bool              // paper plotting: omit non-printing effective layers
-	Monochrome     bool              // neutral black ink; never changes source lineweights
-	ResourceDir    string            // explicit directory for external raster image basenames
-	SourceDir      string            // DWG directory, for relative IMAGEDEF paths only
-	FontMap        map[string]string // source font name -> explicit local TTF/OTF/TTC
-	Layout         string            // empty/model or exact paper-layout name
-	FillMode       string            // source or outline (solid HATCH only; SOLID arrows and pattern hatches retained)
-	Fidelity       string            // empty/preview preserves legacy behavior; faithful uses prepared scene
-	Bounds         string            // full or explicit
+	XrefFiles      map[string]string                               // explicit DWG basename/block name -> local DWG; no implicit network lookup
+	XrefLoader     func(name, declaredPath string) ([]byte, error) // optional custom loader for remote/in-memory Xref DWG bytes (returning nil, nil skips)
+	Plot           bool                                            // paper plotting: omit non-printing effective layers
+	Monochrome     bool                                            // neutral black ink; never changes source lineweights
+	ResourceDir    string                                          // explicit directory for external raster image basenames
+	SourceDir      string                                          // DWG directory, for relative IMAGEDEF paths only
+	FontMap        map[string]string                               // source font name -> explicit local TTF/OTF/TTC
+	Layout         string                                          // empty/model or exact paper-layout name
+	FillMode       string                                          // source or outline (solid HATCH only; SOLID arrows and pattern hatches retained)
+	Fidelity       string                                          // empty/preview preserves legacy behavior; faithful uses prepared scene
+	Bounds         string                                          // full or explicit
 	ViewBox        *drawing.Box2
 	TextMode       string // path or text
 	FontDir        string

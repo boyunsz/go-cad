@@ -145,8 +145,8 @@ func TestFaithfulInvalidOptions(t *testing.T) {
 
 // TestPatternHatchClipsHoleBeforeBlockTransform 验证图案线先按局部孔洞裁切，再应用块变换。
 func TestPatternHatchClipsHoleBeforeBlockTransform(t *testing.T) {
-	outer := []entity.Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
-	hole := []entity.Point2{{3, 3}, {7, 3}, {7, 7}, {3, 7}}
+	outer := []entity.Point2{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 10}, {X: 0, Y: 10}}
+	hole := []entity.Point2{{X: 3, Y: 3}, {X: 7, Y: 3}, {X: 7, Y: 7}, {X: 3, Y: 7}}
 	h := &entity.EntHatch{Paths: []entity.HatchPath{{Points: outer}, {Points: hole}}, Deflines: []entity.HatchDefLine{{Offset: entity.Point2{Y: 1}, Pt0: entity.Point2{Y: .5}}}}
 	f := &drawing.FillGeometry{Hatch: h, Transform: drawing.MatrixXform([6]float64{0, 1, -1, 0, 20, 0})}
 	st, err := hatchStrokes(f, .01)
@@ -203,9 +203,9 @@ func TestNonFiniteGeometryIsReportedWithoutInvalidSVG(t *testing.T) {
 
 // TestRequestedOutlinePreservesArrowAndPattern 验证轮廓显示保留箭头和图案填充，公开显示覆盖且不修改源 HATCH。
 func TestRequestedOutlinePreservesArrowAndPattern(t *testing.T) {
-	square := []entity.Point2{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
+	square := []entity.Point2{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 10, Y: 10}, {X: 0, Y: 10}}
 	h := &entity.EntHatch{SolidFill: true, Paths: []entity.HatchPath{{Points: square}}}
-	solid := &entity.EntSolid{P1: entity.Point2{20, 0}, P2: entity.Point2{21, 0}, P3: entity.Point2{20, 1}, P4: entity.Point2{20, 1}}
+	solid := &entity.EntSolid{P1: entity.Point2{X: 20, Y: 0}, P2: entity.Point2{X: 21, Y: 0}, P3: entity.Point2{X: 20, Y: 1}, P4: entity.Point2{X: 20, Y: 1}}
 	patterned := &entity.EntHatch{Paths: []entity.HatchPath{{Points: square}}, Deflines: []entity.HatchDefLine{{Offset: entity.Point2{Y: 1}}}}
 	p, err := PrepareDrawing(&drawing.Document{ModelSpace: []any{h, solid, patterned}}, RenderOptions{Width: 400, FillMode: "outline"})
 	if err != nil {

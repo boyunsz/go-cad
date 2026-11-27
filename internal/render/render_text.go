@@ -11,11 +11,9 @@ package render
 import (
 	"github.com/boyunsz/go-cad/internal/drawing"
 	"github.com/boyunsz/go-cad/internal/entity"
-	"golang.org/x/image/font/sfnt"
 	"image"
 	"image/color"
 	"math"
-	"os"
 	"strings"
 	"sync"
 
@@ -72,62 +70,13 @@ func loadFont(override string) *opentype.Font {
 // 解析失败返回 nil（文件缺失/损坏/非 OpenType 均按无字体处理）。
 func parseFontFile(path string) *opentype.Font { return parseFontFileStyled(path, false, false) }
 
-// parseFontFileStyled 读取 TTF/OTF 或 TTC 中满足要求的字体成员。
+// parseFontFileStyled 读取 TTF/OTF 或 TTC 中满足要求的字体成员（经进程级缓存复用）。
 // path 可带 #完整名称或 PostScript 名称；显式成员选择优先于粗斜体匹配，
 // 读取、解析或匹配失败时返回 nil，不合成粗体或斜体字形。
 func parseFontFileStyled(path string, bold, italic bool) *opentype.Font {
 	file, selector, _ := strings.Cut(path, "#")
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil
-	}
-	matches := func(f *opentype.Font) bool {
-		if selector == "" {
-			return true
-		}
-		for _, id := range []sfnt.NameID{sfnt.NameIDFull, sfnt.NameIDPostScript} {
-			n, _ := f.Name(nil, id)
-			if strings.EqualFold(n, selector) {
-				return true
-			}
-		}
-		return false
-	}
-	if f, err := opentype.Parse(data); err == nil {
-		if matches(f) {
-			return f
-		}
-		return nil
-	}
-	c, err := opentype.ParseCollection(data)
-	if err != nil {
-		return nil
-	}
-	var first, regular *opentype.Font
-	for i := 0; i < c.NumFonts(); i++ {
-		f, e := c.Font(i)
-		if e != nil || !matches(f) {
-			continue
-		}
-		if selector != "" {
-			return f
-		}
-		n, _ := f.Name(nil, sfnt.NameIDSubfamily)
-		low := strings.ToLower(n)
-		isBold := strings.Contains(low, "bold") || strings.Contains(low, "black")
-		isItalic := strings.Contains(low, "italic") || strings.Contains(low, "oblique")
-		if first == nil && (bold || !isBold) && (italic || !isItalic) {
-			first = f
-		}
-		isRegular := low == "regular" || low == "book" || low == "normal"
-		if regular == nil && isBold == bold && isItalic == italic && (bold || italic || isRegular) {
-			regular = f
-		}
-	}
-	if regular != nil {
-		return regular
-	}
-	return first
+	entry := loadCachedFontFile(file)
+	return entry.selectMember(selector, bold, italic)
 }
 
 // sizedFace 某一字号档的可用字面及其度量（有效像素字号 + 纵度）。
